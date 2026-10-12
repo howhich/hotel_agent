@@ -1,0 +1,54 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      # 强制响应也带上 charset
+      # 不设的话响应头是 application/json（无 charset），而 PowerShell 5.1 这类
+      # 老客户端会退回 Latin-1 解码 -> 中文全变乱码（应用本身是对的，是客户端误会）
+      force: true
+
+spring:
+  application:
+    name: hotel-booking
+
+  # 数据库在服务器 43.142.27.106 的 mysql 容器里
+  #   远端 127.0.0.1:3306  ->  SSH 隧道  ->  本地 127.0.0.1:13306
+  # 隧道断了应用就连不上库（重启应用即可恢复）
+  #
+  # 凭据一律用 ${环境变量:默认值} 占位：
+  #   默认值只是"本地隧道 + 开发库"的方便默认，不是秘密；
+  #   真实环境用环境变量注入，不把密码写进版本库。
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:13306}/${DB_NAME:hotel_booking}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:dzkjdx}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # P0 调试期打开 SQL 日志，方便观察"逐天条件 UPDATE"
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      # 全局逻辑删除：实体里名叫 isDeleted 的字段自动生效（hotel/room_type/booking/sys_user）
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  mapper-locations: classpath*:/mapper/**/*.xml
+
+# 业务配置
+hotel:
+  booking:
+    # 待支付超时时间（P0 只作为常量，P2 交给延迟队列真正执行）
+    pay-timeout-minutes: 15
+
+logging:
+  level:
+    com.fancy.hotel: debug

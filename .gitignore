@@ -1,0 +1,40 @@
+# =============================================================================
+#  hotel-booking  .gitignore
+# =============================================================================
+
+# ---------- 构建产物 ----------
+target/
+build/
+out/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# ---------- 日志与崩溃转储 ----------
+*.log
+logs/
+hs_err_pid*
+replay_pid*
+
+# ---------- 操作系统 ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------- ★ 本地敏感配置（含真实密码的覆盖配置不要入库）----------
+# 主配置 application.yaml 里用 ${ENV:默认值} 占位，
+# 真实凭据放在这些被忽略的文件里，或用环境变量注入。
+src/main/resources/application-local.yaml
+src/main/resources/application-local.yml
+src/main/resources/application-*-local.yaml
+.env
+.env.*
