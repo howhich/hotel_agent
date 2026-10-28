@@ -176,6 +176,9 @@ CREATE TABLE `booking` (
   UNIQUE KEY `uk_booking_id` (`booking_id`),
   KEY `idx_user_create` (`user_id`, `create_time`),
   KEY `idx_status_update` (`booking_status`, `update_time`),
+  -- P2：超时扫表的条件是 (booking_status = 10 AND create_time < ?)，
+  -- 上面那个索引的第二列是 update_time，用不上；补一个匹配的
+  KEY `idx_status_create` (`booking_status`, `create_time`),
   KEY `idx_hotel` (`hotel_id`),
   KEY `idx_roomtype` (`room_type_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预订单';

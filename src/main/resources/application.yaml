@@ -60,10 +60,19 @@ mybatis-plus:
 # 业务配置
 hotel:
   booking:
-    # 待支付超时时间（P0 只作为常量，P2 交给延迟队列真正执行）
+    # 待支付超时时间。P2 起由 Redis 延迟队列按这个时长精确触发释放。
     pay-timeout-minutes: 15
     # 区间库存缓存的 TTL（秒）。缓存是可重建的派生数据，给个 TTL 只是做卫生。
     inventory-cache-ttl-seconds: 86400
+
+    # P2：订单超时处理的两条路径
+    delay:
+      # 主路径：消费 Redis 延迟队列的频率。1 秒 = 超时释放的精度是秒级。
+      scan-interval-ms: 1000
+      # 每次最多认领多少个到期任务
+      batch-size: 50
+      # 兜底路径：扫表。跑得慢无所谓，它的意义是"队列丢了任务也能补上"。
+      sweep-interval-ms: 300000
 
 logging:
   level:

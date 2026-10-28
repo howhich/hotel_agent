@@ -33,6 +33,7 @@ import com.fancy.hotel.mapper.RoomPriceMapper;
 import com.fancy.hotel.mapper.RoomTypeMapper;
 import com.fancy.hotel.service.BookingService;
 import com.fancy.hotel.service.InventoryCacheService;
+import com.fancy.hotel.service.OrderDelayQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -81,6 +82,7 @@ public class BookingServiceImpl implements BookingService {
     private final BookingInventoryLinkMapper linkMapper;
     private final ObjectMapper objectMapper;
     private final InventoryCacheService inventoryCacheService;
+    private final OrderDelayQueue orderDelayQueue;
 
     @Value("${hotel.booking.pay-timeout-minutes:15}")
     private int payTimeoutMinutes;
@@ -280,6 +282,11 @@ public class BookingServiceImpl implements BookingService {
                 .build();
         bookingMapper.insert(booking);
 
+        // ★ 入队放在【事务提交之后】：回滚的订单不该留在延迟队列里，
+        //   否则到点会触发一次"订单不存在"的空转。
+        long executeAt = orderDelayQueue.executeAtFromNow();
+        afterTransaction(() -> orderDelayQueue.enqueue(bookingId, executeAt), null);
+
         log.info("下单成功: bookingId={}, roomTypeId={}, {}~{} ({} 晚 × {} 间), 总价={}",
                 bookingId, dto.getRoomTypeId(), dto.getCheckIn(), dto.getCheckOut(),
                 dates.size(), roomCount, quote.getTotalAmount());
@@ -325,6 +332,8 @@ public class BookingServiceImpl implements BookingService {
             // 条件 UPDATE 没打中：状态在读取之后被别人改了
             throw BusinessException.conflict("订单状态已变化，请刷新后重试");
         }
+        // 已经付过了，不必再等到点触发
+        dequeueOnCommit(bookingId);
         log.info("支付成功: bookingId={}, amount={}, tradeNo={}", bookingId, b.getTotalAmount(),
                 dto == null ? null : dto.getTradeNo());
     }
@@ -363,6 +372,8 @@ public class BookingServiceImpl implements BookingService {
 
         // ---- 按台账释放库存 ----
         releaseInventory(bookingId);
+
+        dequeueOnCommit(bookingId);   // 已取消，不必再等到点触发
 
         log.info("取消成功: bookingId={}, {} -> 90, 可退比例={}, 退款={}",
                 bookingId, st.getDesc(), ratio.toPlainString(), refund);
@@ -538,29 +549,28 @@ public class BookingServiceImpl implements BookingService {
             return false;
         }
         releaseInventory(bookingId);
+        // 队列里可能还有它的残留（比如这条是兜底扫表触发的，成员并没被认领过），顺手清掉
+        dequeueOnCommit(bookingId);
         log.info("订单超时失效: bookingId={}", bookingId);
         return true;
     }
 
     @Override
-    public int expireTimeoutBookings() {
+    public List<Long> findTimeoutPendingIds(int limit) {
         LocalDateTime before = LocalDateTime.now().minusMinutes(payTimeoutMinutes);
+        int cap = Math.max(1, Math.min(limit, 1000));
         List<Booking> list = bookingMapper.selectList(new LambdaQueryWrapper<Booking>()
                 .eq(Booking::getBookingStatus, BookingStatus.PENDING_PAYMENT.getCode())
                 .lt(Booking::getCreateTime, before)
-                .last("limit 200"));
-        int n = 0;
+                .orderByAsc(Booking::getCreateTime)       // 先到期的先处理
+                .last("limit " + cap));
+        List<Long> ids = new ArrayList<>(list.size());
         for (Booking b : list) {
-            try {
-                if (expireBooking(b.getBookingId())) {
-                    n++;
-                }
-            } catch (Exception e) {
-                // 单条失败不中断整批
-                log.error("订单失效处理失败: bookingId={}", b.getBookingId(), e);
+            if (b.getBookingId() != null) {
+                ids.add(b.getBookingId());
             }
         }
-        return n;
+        return ids;
     }
 
     // =========================================================================
@@ -601,6 +611,11 @@ public class BookingServiceImpl implements BookingService {
                 }
             }, null);
         }
+    }
+
+    /** 订单进入终态后从延迟队列移除（避免到点白跑一趟） */
+    private void dequeueOnCommit(Long bookingId) {
+        afterTransaction(() -> orderDelayQueue.remove(bookingId), null);
     }
 
     /**

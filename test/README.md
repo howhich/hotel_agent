@@ -37,8 +37,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p0_1_reschedule_test.ps1` | 改期：延长 / 平移重叠 / 缩短 / 错开 / 改回（台账 upsert）/ 失败回滚 / 状态校验 |
 | `p1_inventory_cache_test.ps1` | Redis 缓存：重建 / 双写 / 改期差集 / **快路径拦截** / **回滚补偿** / 冷缓存回源 / 跨月 / 对账 |
 | `p1_idempotency_test.ps1` | 幂等：连点两次只下一单 / 参数变化算新请求 / 客户端 key 优先 / **Redis 清空后靠 DB 兜底回放** / 失败可重试 |
+| `p2_delay_queue_test.ps1` | 延迟队列：入队出队时机 / 回滚不入队 / **到点自动释放** / **重复触发幂等** / **兜底扫表捞回** / 队列重建 / `volatile-lru` 保护 |
 
-合计 **99 项断言**。
+合计 **123 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 
@@ -81,7 +82,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\fix-bom.ps1
 
 ```
 MySQL : booking / room_inventory / booking_inventory_link / idempotent_record
-Redis : hotel:inv:*（库存缓存）  hotel:idem:*（幂等键）
+Redis : hotel:*   （库存缓存 hotel:inv、幂等键 hotel:idem、延迟队列 hotel:delay…）
 ```
 
-**幂等状态也必须重置。** 否则连着跑套件时，第二轮用同样的请求体下单会命中上一轮留下的幂等记录，直接回放一个早已被取消的旧 `bookingId` —— 表现为整个套件假失败，而且看起来像是业务代码坏了（踩过）。
+**Redis 里的状态也算测试状态。** 踩过两次：
+
+1. 不清 `hotel:idem:*` → 第二轮用同样的请求体下单会命中上一轮的幂等记录，直接回放一个早已被取消的旧 `bookingId`，整个套件假失败
+2. 不清 `hotel:delay:*` → 上一轮排着的超时任务会在本轮跑到一半时突然触发，把当前用例的订单提前释放掉
+
+所以直接 `hotel:*` 全清，以后新增 key 前缀也不会再漏。
+
+## 其它两个小陷阱
+
+**`Set-StrictMode -Version 1.0`** 已开在 `_testlib.ps1` 里。PowerShell 默认把未声明变量当 `$null` —— 拼错一个变量名（比如写了 `$f22` 却从没声明）会静默传空串下去，最后报的是服务端 400，离真凶很远。开了 strict mode 就会直接指着那一行报错。
+
+**变量名不要叫 `$fail`**：公共库里 `$script:fail` 是断言失败计数器，脚本里再定义一个 `$fail` 会把它覆盖成 PSObject，然后 `$script:fail++` 就会报 "operand is a PSObject"。

@@ -20,6 +20,31 @@ public final class RedisKeyConstants {
 
     private static final String INVENTORY_PREFIX = "hotel:inv";
     private static final String IDEMPOTENT_PREFIX = "hotel:idem";
+    private static final String DELAY_PREFIX = "hotel:delay";
+
+    /**
+     * 订单超时延迟队列（ZSet）
+     *
+     * <pre>
+     *   key    hotel:delay:order      (ZSet)
+     *   score  触发时刻的 epoch 毫秒
+     *   member bookingId
+     * </pre>
+     *
+     * <p>★ 这个 key【刻意不设 TTL】，因为它是"待办任务"而不是缓存 ——
+     * 整体过期就意味着任务集体丢失。
+     *
+     * <p>但也因此，在 {@code allkeys-lru} 淘汰策略下它跟普通缓存一样会被淘汰，
+     * 任务就丢了。所以有两道保险：
+     * <ol>
+     *   <li>服务器 Redis 的淘汰策略改成 {@code volatile-lru} ——
+     *       不设 TTL 的键永不被淘汰，正好保护它（设了 TTL 的库存缓存照旧可淘汰）</li>
+     *   <li>DB 扫表兜底（{@code OrderTimeoutJob.sweep()}），真丢了也能捞回来</li>
+     * </ol>
+     */
+    public static String orderDelayQueueKey() {
+        return DELAY_PREFIX + ":order";
+    }
 
     /**
      * 区间库存 bucket：<b>一个房型一个月</b>一个 hash

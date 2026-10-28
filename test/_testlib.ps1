@@ -22,6 +22,12 @@
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
+# 让"引用了未声明的变量"立刻报错。
+# PowerShell 默认把未定义变量当 $null —— 拼错一个变量名会静默传空串下去，
+# 最后报的却是服务端 400，很难定位（踩过：$f22 从没声明，checkOut 变成空串）。
+# Version 1.0 只查未初始化变量，不管"属性不存在"，才不会误伤 $r.Body.data 这类写法。
+Set-StrictMode -Version 1.0
+
 # ---------- 环境相关的东西都可以用环境变量覆盖 ----------
 # 默认值对应本项目开发机（本地 MySQL/redis 客户端 + SSH 隧道端口）。
 # 换台机器就设这几个环境变量，不用改脚本：
@@ -157,15 +163,18 @@ function NewPaidBooking([int]$rt, [string]$ci, [string]$co) {
     return [pscustomobject]@{ Http=200; Body=[pscustomobject]@{ data=$id } }
 }
 
-# 把 DB 的测试数据清空，并删掉 Redis 里的库存缓存键和幂等键
+# 把 DB 的测试数据清空，并删掉 Redis 里所有本项目的键
 #
-#  ★ 幂等状态也属于"测试状态"：不清 idempotent_record / hotel:idem:*，
-#    下一轮测试用同样的请求体下单时会命中上一轮的记录，直接回放一个旧 bookingId，
-#    整个套件会集体失败（而且看起来像是功能坏了）。踩过。
+#  ★ Redis 里的状态也算"测试状态"。踩过两次：
+#    1) 不清 hotel:idem:*，下一轮用同样的请求体下单会命中上一轮的幂等记录、
+#       回放一个旧 bookingId，整个套件集体假失败
+#    2) 不清 hotel:delay:*，上一轮排着的超时任务会在本轮跑到一半时突然触发，
+#       把当前用例的订单提前释放掉
+#    所以这里直接用 hotel:* 全清 —— 新增 key 前缀也不会再漏。
 function ResetTestData {
     Sql "DELETE FROM booking_inventory_link; DELETE FROM room_inventory; DELETE FROM booking; DELETE FROM idempotent_record;" | Out-Null
     $n = 0
-    foreach ($pat in @('hotel:inv:*','hotel:idem:*')) {
+    foreach ($pat in @('hotel:*')) {
         $keys = RedisCmd @('KEYS', $pat)
         if ($keys) {
             foreach ($k in ($keys -split "`n")) {

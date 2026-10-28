@@ -6,6 +6,7 @@ import com.fancy.hotel.domain.dto.CancelBookingDTO;
 import com.fancy.hotel.domain.dto.CreateBookingDTO;
 import com.fancy.hotel.domain.dto.PayBookingDTO;
 import com.fancy.hotel.domain.dto.RescheduleBookingDTO;
+import com.fancy.hotel.job.OrderTimeoutJob;
 import com.fancy.hotel.service.BookingService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.*;
 public class BookingController {
 
     private final BookingService bookingService;
+    private final OrderTimeoutJob orderTimeoutJob;
 
     /** 可订查询（只读，不占库存） */
     @PostMapping("/availability")
@@ -83,12 +85,14 @@ public class BookingController {
     }
 
     /**
-     * 手动触发「超时未支付」扫描
+     * 手动触发一次「超时未支付」兜底扫表
      *
-     * <p>P0 用来验证 10 -> 91 的失效链路；P2 会交给 Redis 延迟队列自动执行。
+     * <p>P2 起超时释放由 Redis 延迟队列自动做（每秒一次），这个接口降级成
+     * <b>兜底路径的手动入口</b>：调试、或怀疑队列丢任务时用。
+     * 逻辑和定时任务完全一样（{@code OrderTimeoutJob.sweepOnce()}）。
      */
     @PostMapping("/expire-scan")
     public Result expireScan() {
-        return Result.ok(bookingService.expireTimeoutBookings());
+        return Result.ok(orderTimeoutJob.sweepOnce());
     }
 }

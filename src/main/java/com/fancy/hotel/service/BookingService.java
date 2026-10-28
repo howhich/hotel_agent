@@ -47,9 +47,17 @@ public interface BookingService {
      */
     RescheduleResultVO rescheduleBooking(Long bookingId, RescheduleBookingDTO dto);
 
-    /** 单笔失效：10 -> 91（P2 会由延迟队列调用，P0 先提供手动入口） */
+    /** 单笔失效：10 -> 91（延迟队列和兜底扫表都调它） */
     boolean expireBooking(Long bookingId);
 
-    /** 批量扫描超时未支付并失效，返回处理条数 */
-    int expireTimeoutBookings();
+    /**
+     * 查出「已超时但仍待支付」的订单 ID（只查询，不处理）
+     *
+     * <p>★ 批量失效的循环放在 {@code OrderTimeoutJob} 里，不在这里。
+     * 因为如果在同一个 Bean 内部用 {@code this.expireBooking()} 循环，
+     * 就是自调用 —— Spring 代理不参与，{@code @Transactional} 直接失效，
+     * {@code markCancelled} 和 {@code releaseInventory} 会各自自动提交，
+     * 中间失败就留下"已取消但库存没释放"的脏数据。
+     */
+    List<Long> findTimeoutPendingIds(int limit);
 }

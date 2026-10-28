@@ -37,4 +37,15 @@ public class RedisScripts {
     public RedisScript<List> inventoryReleaseScript() {
         return RedisScript.of(new ClassPathResource("lua/inventory_release.lua"), List.class);
     }
+
+    /**
+     * 订单超时延迟队列：原子认领到期任务
+     *
+     * <p>「取 + 删」在一个脚本里 = 谁删掉谁处理，多实例安全。
+     */
+    @Bean
+    @SuppressWarnings("rawtypes")
+    public RedisScript<List> delayClaimScript() {
+        return RedisScript.of(new ClassPathResource("lua/delay_claim.lua"), List.class);
+    }
 }
