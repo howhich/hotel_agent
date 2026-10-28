@@ -41,15 +41,18 @@ VALUES
     (2002, 1001, '豪华双床房', 2, 2, '两张 1.2m 床', 38, 0, 1, 2, 1, 0);
 
 -- -----------------------------------------------------------------------------
--- 价格日历：从今天起 60 天
+-- 价格日历：从【今天】起 180 天（可重复执行，会按当前日期顺延）
 --   周一~周四 400/500，周五~周日 600/700（演示"逐晚累加"与周末差价）
 --   MySQL 的 DAYOFWEEK：1=周日，7=周六
+--
+--   ★ 用 CURDATE() 而不是写死日期：种子数据要"过很久还能用"。
+--     180 天是给测试脚本留余量（它们把日期锚定到"下一个周一"再往后推最多 57 天）。
 -- -----------------------------------------------------------------------------
 INSERT INTO `room_price` (`room_type_id`, `stay_date`, `price`, `member_price`)
 WITH RECURSIVE seq(n) AS (
     SELECT 0
     UNION ALL
-    SELECT n + 1 FROM seq WHERE n < 59
+    SELECT n + 1 FROM seq WHERE n < 179
 )
 SELECT 2001,
        DATE_ADD(CURDATE(), INTERVAL n DAY),
@@ -63,7 +66,7 @@ INSERT INTO `room_price` (`room_type_id`, `stay_date`, `price`, `member_price`)
 WITH RECURSIVE seq(n) AS (
     SELECT 0
     UNION ALL
-    SELECT n + 1 FROM seq WHERE n < 59
+    SELECT n + 1 FROM seq WHERE n < 179
 )
 SELECT 2002,
        DATE_ADD(CURDATE(), INTERVAL n DAY),
