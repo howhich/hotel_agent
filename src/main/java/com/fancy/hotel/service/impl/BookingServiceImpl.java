@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fancy.hotel.common.BusinessException;
+import com.fancy.hotel.common.Idempotent;
 import com.fancy.hotel.domain.dto.AvailabilityQueryDTO;
 import com.fancy.hotel.domain.dto.CancelBookingDTO;
 import com.fancy.hotel.domain.dto.CreateBookingDTO;
@@ -191,6 +192,7 @@ public class BookingServiceImpl implements BookingService {
     // =========================================================================
 
     @Override
+    @Idempotent(bizType = "CREATE_BOOKING", ttlSeconds = 600)
     @Transactional(rollbackFor = Exception.class)
     public Long createBooking(CreateBookingDTO dto) {
         validateRange(dto.getCheckIn(), dto.getCheckOut());

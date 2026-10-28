@@ -251,3 +251,28 @@ CREATE TABLE `sys_user_poi` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_tag` (`user_id`, `poi_tag`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户常用地点';
+
+
+-- =============================================================================
+-- 9. 幂等记录（P1）
+--
+--   两层防御的【第二层】：第一层是 Redis SET NX（快、扛并发），
+--   这张表的唯一键在"Redis 挂了"或"请求打到另一台实例"时兜底，
+--   同时还能【回放结果】—— 重复请求直接返回首次的 booking_id 而不是报错。
+--
+--   已有库升级用 db/migration-p1.sql。
+-- =============================================================================
+CREATE TABLE `idempotent_record` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `idem_key`    VARCHAR(128) NOT NULL                COMMENT '幂等键（业务类型 + 用户 + 参数指纹）',
+  `biz_type`    VARCHAR(32)  NOT NULL                COMMENT '业务类型，如 CREATE_BOOKING',
+  `user_id`     BIGINT       DEFAULT NULL            COMMENT '发起用户（可空）',
+  `result_ref`  VARCHAR(64)  DEFAULT NULL            COMMENT '首次执行的结果引用，如 booking_id',
+  `status`      TINYINT      NOT NULL DEFAULT 0      COMMENT '0执行中 1已完成 2已失败',
+  `expire_time` DATETIME     NOT NULL                COMMENT '过期时间（定期清理）',
+  `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_idem_key` (`idem_key`),
+  KEY `idx_expire` (`expire_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='幂等记录';

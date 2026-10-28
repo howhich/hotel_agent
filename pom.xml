@@ -39,6 +39,12 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- 幂等的 @Idempotent 切面用（@Aspect 需要 aspectjweaver） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+
         <!-- P1 起：Redis（区间库存缓存 + 幂等）。
              只引 spring-data-redis（Lettuce），Lua 用 DefaultRedisScript 执行；
              Redisson 等到 P3 做分布式锁时再加。 -->
