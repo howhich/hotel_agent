@@ -31,11 +31,14 @@ import com.fancy.hotel.mapper.RoomInventoryMapper;
 import com.fancy.hotel.mapper.RoomPriceMapper;
 import com.fancy.hotel.mapper.RoomTypeMapper;
 import com.fancy.hotel.service.BookingService;
+import com.fancy.hotel.service.InventoryCacheService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -76,6 +79,7 @@ public class BookingServiceImpl implements BookingService {
     private final BookingMapper bookingMapper;
     private final BookingInventoryLinkMapper linkMapper;
     private final ObjectMapper objectMapper;
+    private final InventoryCacheService inventoryCacheService;
 
     @Value("${hotel.booking.pay-timeout-minutes:15}")
     private int payTimeoutMinutes;
@@ -208,7 +212,28 @@ public class BookingServiceImpl implements BookingService {
         long bookingId = IdWorker.getId();
         List<LocalDate> dates = stayDates(dto.getCheckIn(), dto.getCheckOut());
 
-        // ---------- ★ 逐天占库存 ----------
+        // ---------- ★ Redis 预检预占（快路径，但不是裁决者）----------
+        //   OK         -> 缓存已预占，继续走 DB；万一事务没提交，回调里把预占还回去
+        //   REJECTED   -> 缓存说不够，直接拒，省掉一次 DB 往返
+        //   CACHE_MISS -> 缓存不可用，静默退化为纯 DB 路径（绝不因此让用户下单失败）
+        InventoryCacheService.ReserveResult reserve =
+                inventoryCacheService.tryReserve(dto.getRoomTypeId(), rt.getTotalRooms(), dates, roomCount);
+        if (reserve.status() == InventoryCacheService.ReserveStatus.REJECTED) {
+            log.info("下单被 Redis 预检拦下: roomTypeId={}, date={}, need={}",
+                    dto.getRoomTypeId(), reserve.rejectedDate(), roomCount);
+            throw BusinessException.conflict(reserve.rejectedDate() + " 房量不足，请调整日期或间数");
+        }
+        if (reserve.status() == InventoryCacheService.ReserveStatus.OK) {
+            // ★ 补偿放在事务回调里，而不是方法体的 catch 里：
+            //   只有这样，连"提交阶段才失败"（比如提交时死锁）也能补偿到。
+            afterTransaction(null, () -> {
+                int back = inventoryCacheService.releaseAll(dto.getRoomTypeId(), dates, roomCount);
+                log.warn("下单事务未提交，已回滚 Redis 预占: roomTypeId={}, 回滚 {} 天",
+                        dto.getRoomTypeId(), back);
+            });
+        }
+
+        // ---------- ★ 逐天占库存（DB 才是裁决者）----------
         for (LocalDate d : dates) {
             // 惰性初始化该天的库存行（幂等，靠 UNIQUE 约束）
             roomInventoryMapper.insertIgnore(dto.getRoomTypeId(), d, rt.getTotalRooms());
@@ -397,6 +422,20 @@ public class BookingServiceImpl implements BookingService {
         BigDecimal newTotal = quotePrice(b.getRoomTypeId(),
                 dto.getNewCheckIn(), dto.getNewCheckOut(), roomCount).getTotalAmount();
 
+        // ---------- ★ Redis 预检预占（只针对新增加的天）----------
+        if (!toOccupy.isEmpty()) {
+            InventoryCacheService.ReserveResult reserve = inventoryCacheService.tryReserve(
+                    b.getRoomTypeId(), rt.getTotalRooms(), toOccupy, roomCount);
+            if (reserve.status() == InventoryCacheService.ReserveStatus.REJECTED) {
+                throw BusinessException.conflict(reserve.rejectedDate() + " 房量不足，改期失败");
+            }
+            if (reserve.status() == InventoryCacheService.ReserveStatus.OK) {
+                // 事务没提交，就把新增加那几天的 Redis 预占还回去
+                afterTransaction(null, () ->
+                        inventoryCacheService.releaseAll(b.getRoomTypeId(), toOccupy, roomCount));
+            }
+        }
+
         // ---------- ① 释放"旧有新无"的天 ----------
         for (LocalDate d : toRelease) {
             releaseOneDay(bookingId, b.getRoomTypeId(), d, roomCount);
@@ -413,6 +452,14 @@ public class BookingServiceImpl implements BookingService {
             }
             // 认领占用；若撞上该单历史已释放的行，upsert 会把它翻回 released=0
             linkMapper.upsertHold(bookingId, b.getRoomTypeId(), d, roomCount);
+        }
+
+        // ---------- ★ Redis 侧：等事务提交后再释放"旧有新无"的那几天 ----------
+        // 注意：releaseOneDay() 只动 DB；Redis 的释放统一在这里做，避免重复释放。
+        if (!toRelease.isEmpty()) {
+            afterTransaction(
+                    () -> inventoryCacheService.releaseAll(b.getRoomTypeId(), toRelease, roomCount),
+                    null);
         }
 
         // ---------- ③ 更新订单（CAS：状态没被别人改才落库） ----------
@@ -527,6 +574,7 @@ public class BookingServiceImpl implements BookingService {
      */
     private void releaseInventory(Long bookingId) {
         List<BookingInventoryLink> links = linkMapper.selectUnreleased(bookingId);
+        List<BookingInventoryLink> reallyReleased = new ArrayList<>();
         for (BookingInventoryLink link : links) {
             int marked = linkMapper.markReleased(link.getId());
             if (marked == 0) {
@@ -539,7 +587,67 @@ public class BookingServiceImpl implements BookingService {
                 log.error("库存释放异常（台账与库存不一致）: bookingId={}, roomTypeId={}, date={}, n={}",
                         bookingId, link.getRoomTypeId(), link.getStayDate(), link.getRoomCount());
             }
+            reallyReleased.add(link);
         }
+
+        // ★ Redis 侧等到【事务提交之后】再释放：
+        //   提交成功 -> 释放；回滚 -> 什么都不做（DB 没变，Redis 也不该变）
+        if (!reallyReleased.isEmpty()) {
+            afterTransaction(() -> {
+                for (BookingInventoryLink l : reallyReleased) {
+                    inventoryCacheService.releaseOne(l.getRoomTypeId(), l.getStayDate(), l.getRoomCount());
+                }
+            }, null);
+        }
+    }
+
+    /**
+     * 注册事务回调
+     *
+     * <p>本项目要同时维护两份库存（DB 与 Redis 缓存），这是典型的双写问题。
+     * 处理原则：
+     * <ul>
+     *   <li><b>先占后查的写（下单/改期）</b>：Redis 预占在前，DB 在后；
+     *       事务一旦没提交，就在 {@code onRollback} 里把 Redis 预占还回去。</li>
+     *   <li><b>释放型的写（取消/失效/改期的旧日期）</b>：Redis 释放放在
+     *       {@code onCommit} 里 —— DB 提交成功了才动缓存。</li>
+     * </ul>
+     *
+     * <p>★ 为什么不用方法体内的 try/catch：那种写法只能覆盖"方法体抛异常"，
+     * 覆盖不到"提交阶段才失败"（例如提交时死锁）。而 {@code afterCompletion}
+     * 是在事务真正结束之后才回调的，两种情况都能兜住。
+     *
+     * @param onCommit   提交成功后执行（可为 null）
+     * @param onRollback 回滚后执行（可为 null）
+     */
+    private void afterTransaction(Runnable onCommit, Runnable onRollback) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 没有活动事务（理论上不会发生，本类写方法都带 @Transactional）
+            log.warn("当前没有活动事务，Redis 同步回调将立即执行 onCommit");
+            if (onCommit != null) {
+                onCommit.run();
+            }
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                try {
+                    if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                        if (onCommit != null) {
+                            onCommit.run();
+                        }
+                    } else {
+                        if (onRollback != null) {
+                            onRollback.run();
+                        }
+                    }
+                } catch (Exception e) {
+                    // 缓存同步失败不能影响已经提交的业务结果，只告警
+                    log.error("Redis 库存同步回调失败（DB 结果不受影响）", e);
+                }
+            }
+        });
     }
 
     /**

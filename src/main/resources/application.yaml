@@ -29,6 +29,20 @@ spring:
       minimum-idle: 2
       connection-timeout: 5000
 
+  # Redis（P1 起）：区间库存缓存 + 幂等
+  #   远端 127.0.0.1:6379  ->  SSH 隧道  ->  本地 127.0.0.1:16379
+  #
+  # ★ 这里放的全部是【派生数据】（可从 DB 重建），
+  #   所以即使服务器 Redis 配的是 allkeys-lru 把键淘汰掉也不影响正确性 ——
+  #   最多是一次 cache miss，回源 DB 即可。DB 才是裁决者。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:16379}
+      password: ${REDIS_PASSWORD:dzkjdx}
+      timeout: 3000ms
+      connect-timeout: 3000ms
+
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
@@ -48,6 +62,8 @@ hotel:
   booking:
     # 待支付超时时间（P0 只作为常量，P2 交给延迟队列真正执行）
     pay-timeout-minutes: 15
+    # 区间库存缓存的 TTL（秒）。缓存是可重建的派生数据，给个 TTL 只是做卫生。
+    inventory-cache-ttl-seconds: 86400
 
 logging:
   level:
