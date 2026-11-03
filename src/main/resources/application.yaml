@@ -74,6 +74,15 @@ hotel:
       # 兜底路径：扫表。跑得慢无所谓，它的意义是"队列丢了任务也能补上"。
       sweep-interval-ms: 300000
 
+  # P2.2：附近酒店（Redis GEO）
+  nearby:
+    default-radius-km: 5
+    default-limit: 20
+    # 启动时从 DB 重建 GEO 索引。
+    # 索引是可重建的派生数据，但"空索引"会让附近查询静默返回空列表 ——
+    # 与其让调用方困惑，不如启动时就建好（5 家酒店，几十毫秒）。
+    rebuild-on-startup: true
+
 logging:
   level:
     com.fancy.hotel: debug

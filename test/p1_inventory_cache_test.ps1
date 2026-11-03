@@ -83,6 +83,12 @@ Check 'rejected with 409' ($g.Http -eq 409) ''
 Check 'DB never touched (sold still 0)' ((DSold $RT $g21) -eq '0') ''
 Check 'no booking row created' ((BCount) -eq $before) ''
 
+# ★ 上面为了验证"快路径真的在拦"，故意把这个日期的缓存改成了满值。
+#   用完必须立刻从 DB 修回来 —— 否则后面用到同一日期（比如跨月测试正好落在这天）
+#   会被这条假数据挡住，表现为"功能坏了"。
+Api POST "/booking/inv/rebuild?roomTypeId=$RT&from=$g21&to=$g22" '' | Out-Null
+"    -- 已从 DB 修复 $g21 的缓存值: $(RSold $RT $g21) --"
+
 # ---------------------------------------------------------------------------
 "`n=== 6. 冷缓存自动回源（绝不让缓存问题影响用户）==="
 "  删掉 $m28 所在月份的整个 bucket"

@@ -21,6 +21,7 @@ public final class RedisKeyConstants {
     private static final String INVENTORY_PREFIX = "hotel:inv";
     private static final String IDEMPOTENT_PREFIX = "hotel:idem";
     private static final String DELAY_PREFIX = "hotel:delay";
+    private static final String GEO_PREFIX = "hotel:geo";
 
     /**
      * 订单超时延迟队列（ZSet）
@@ -44,6 +45,24 @@ public final class RedisKeyConstants {
      */
     public static String orderDelayQueueKey() {
         return DELAY_PREFIX + ":order";
+    }
+
+    /**
+     * 酒店地理索引（GEO，member = hotelId）
+     *
+     * <pre>
+     *   GEOADD    hotel:geo:all &lt;lng&gt; &lt;lat&gt; &lt;hotelId&gt;
+     *   GEOSEARCH hotel:geo:all FROMLONLAT &lt;lng&gt; &lt;lat&gt; BYRADIUS &lt;km&gt; km ASC WITHDIST
+     * </pre>
+     *
+     * <p>用<b>单个 key</b> 而不是按城市分：跨城市、跨城市边界都能搜到；
+     * 数据量小的时候完全够用。分片（按城市 hash）留到酒店数上万再考虑。
+     *
+     * <p>它是从 {@code hotel} 表派生的索引，可重建，所以被淘汰也无所谓 ——
+     * 见 {@code POST /booking/hotel/geo/rebuild}。
+     */
+    public static String hotelGeoKey() {
+        return GEO_PREFIX + ":all";
     }
 
     /**

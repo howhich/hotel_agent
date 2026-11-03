@@ -38,8 +38,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p1_inventory_cache_test.ps1` | Redis 缓存：重建 / 双写 / 改期差集 / **快路径拦截** / **回滚补偿** / 冷缓存回源 / 跨月 / 对账 |
 | `p1_idempotency_test.ps1` | 幂等：连点两次只下一单 / 参数变化算新请求 / 客户端 key 优先 / **Redis 清空后靠 DB 兜底回放** / 失败可重试 |
 | `p2_delay_queue_test.ps1` | 延迟队列：入队出队时机 / 回滚不入队 / **到点自动释放** / **重复触发幂等** / **兜底扫表捞回** / 队列重建 / `volatile-lru` 保护 |
+| `p2_geo_test.ps1` | 酒店 GEO：索引为空可辨识 / 重建 / 半径过滤 / **距离用独立 haversine 验算** / 排序 / limit / 参数校验 / 索引丢失可恢复 |
 
-合计 **123 项断言**。
+合计 **146 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 
@@ -97,3 +98,7 @@ Redis : hotel:*   （库存缓存 hotel:inv、幂等键 hotel:idem、延迟队�
 **`Set-StrictMode -Version 1.0`** 已开在 `_testlib.ps1` 里。PowerShell 默认把未声明变量当 `$null` —— 拼错一个变量名（比如写了 `$f22` 却从没声明）会静默传空串下去，最后报的是服务端 400，离真凶很远。开了 strict mode 就会直接指着那一行报错。
 
 **变量名不要叫 `$fail`**：公共库里 `$script:fail` 是断言失败计数器，脚本里再定义一个 `$fail` 会把它覆盖成 PSObject，然后 `$script:fail++` 就会报 "operand is a PSObject"。
+
+**故意破坏状态之后要修回来。** 有些用例要故意把数据搞脏（比如把 Redis 里某天的库存改成"满"，验证快路径真的在拦请求）。这类用例**用完必须立刻从 DB 修回来**，否则后面的用例一旦用到同一天就会被假数据挡住。
+
+> 踩过：`p1_inventory_cache_test` 的 §5 故意污染了"锚点 +21 天"那天的缓存且没修，当时跨月测试用的是另一天，相安无事；换了个日期后两者**撞到同一天**，跨月下单直接被假数据挡成 409，看起来像功能坏了。
