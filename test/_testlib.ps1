@@ -87,6 +87,19 @@ function Summarize {
 # ---------- HTTP ----------
 function Api {
     param([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers)
+
+    # ★ 守一下 $script:Base 有没有被测试脚本覆盖掉。
+    #   PowerShell 变量名【不区分大小写】，脚本里随手写个 $base = "..." 就会
+    #   把这里的 API 地址改成别的东西，然后所有请求都变成 HTTP -1，
+    #   报错却只说"连不上"，完全看不出真凶。踩过。
+    #   本库占用的变量名（测试脚本里别用）：
+    #     $Base $Mysql $Margs $Rcli $DbPort $RedisPort $DbPwd $RedisPwd
+    #     $M0 $pass $fail
+    if ($script:Base -notmatch '^https?://') {
+        throw "公共库的 `$script:Base 被覆盖了，现在的值是 '$($script:Base)'。" +
+              "别用 `$base / `$Base 当变量名 —— 它和 API 地址是同一个变量（变量名不区分大小写）。"
+    }
+
     $p = @{ Method=$Method; Uri=($script:Base+$Path); ContentType='application/json; charset=utf-8'; TimeoutSec=30 }
     if ($Json) { $p.Body = [Text.Encoding]::UTF8.GetBytes($Json) }
     if ($Headers) { $p.Headers = $Headers }
@@ -142,10 +155,10 @@ function PriceSum([int]$rt, [string]$from, [string]$to) {
 #   '-f' 里 JSON 的字面花括号必须写成 {{ }}，很容易漏（踩过）。
 function JsonBody([hashtable]$h) { ($h | ConvertTo-Json -Compress -Depth 5) }
 
-function NewBooking([int]$rt, [string]$ci, [string]$co, [int]$rooms) {
+function NewBooking([int]$rt, [string]$ci, [string]$co, [int]$rooms, [int]$hotelId = 1001) {
     $json = JsonBody @{
         userId     = 9001
-        hotelId    = 1001
+        hotelId    = $hotelId
         roomTypeId = $rt
         checkIn    = $ci
         checkOut   = $co
@@ -155,8 +168,8 @@ function NewBooking([int]$rt, [string]$ci, [string]$co, [int]$rooms) {
     return Api POST '/booking' $json
 }
 
-function NewPaidBooking([int]$rt, [string]$ci, [string]$co) {
-    $c = NewBooking $rt $ci $co 1
+function NewPaidBooking([int]$rt, [string]$ci, [string]$co, [int]$hotelId = 1001) {
+    $c = NewBooking $rt $ci $co 1 $hotelId
     if ($c.Http -ne 200) { return $c }          # 失败就把响应原样返回，调用方自己判
     $id = $c.Body.data
     Api POST "/booking/$id/pay" '{"payChannel":1}' | Out-Null

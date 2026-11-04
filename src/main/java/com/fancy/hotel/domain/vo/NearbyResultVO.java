@@ -20,7 +20,16 @@ public class NearbyResultVO {
     /** 实际生效的半径（可能来自默认值） */
     private Double radiusKm;
 
-    /** 命中几家 */
+    /** 实际生效的排序方式：distance / rating / price */
+    private String sortBy;
+
+    /** 是否做了有房过滤（只有 checkIn + checkOut 都传了才为 true） */
+    private Boolean availabilityFiltered;
+
+    /** 过滤之后、截断到 limit 之前的总数 —— 用来看"范围内一共有几家匹配" */
+    private Integer matchedTotal;
+
+    /** 实际返回几家 */
     private Integer count;
 
     /**

@@ -3,6 +3,9 @@ package com.fancy.hotel.domain.dto;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import lombok.Data;
+import org.springframework.format.annotation.DateTimeFormat;
+
+import java.time.LocalDate;
 
 /**
  * 附近酒店查询
@@ -32,4 +35,27 @@ public class NearbyQueryDTO {
     @DecimalMin(value = "1", message = "limit 至少 1")
     @DecimalMax(value = "50", message = "limit 最多 50")
     private Integer limit;
+
+    // ===== P2.3：排序 + 有房过滤 =====
+
+    /** 排序方式：distance（默认）/ rating / price */
+    private String sortBy;
+
+    /**
+     * 入住日（含）
+     *
+     * <p>{@code checkIn} 和 {@code checkOut} <b>一起传</b>才会做有房过滤；
+     * 只传一个会报 400（避免"半个条件"被静默忽略）。
+     */
+    @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
+    private LocalDate checkIn;
+
+    /** 离店日（不含） */
+    @DateTimeFormat(iso = DateTimeFormat.ISO.DATE)
+    private LocalDate checkOut;
+
+    /** 间数，做有房过滤时用，默认 1 */
+    @DecimalMin(value = "1", message = "间数至少 1")
+    @DecimalMax(value = "5", message = "单次最多 5 间")
+    private Integer roomCount;
 }

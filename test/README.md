@@ -39,8 +39,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p1_idempotency_test.ps1` | 幂等：连点两次只下一单 / 参数变化算新请求 / 客户端 key 优先 / **Redis 清空后靠 DB 兜底回放** / 失败可重试 |
 | `p2_delay_queue_test.ps1` | 延迟队列：入队出队时机 / 回滚不入队 / **到点自动释放** / **重复触发幂等** / **兜底扫表捞回** / 队列重建 / `volatile-lru` 保护 |
 | `p2_geo_test.ps1` | 酒店 GEO：索引为空可辨识 / 重建 / 半径过滤 / **距离用独立 haversine 验算** / 排序 / limit / 参数校验 / 索引丢失可恢复 |
+| `p2_nearby_filter_test.ps1` | 附近酒店：三种排序 / **排序与截断的顺序** / 有房过滤 / 过滤+排序叠加 / roomCount 两条路径 / 半个日期区间报错 |
 
-合计 **146 项断言**。
+合计 **173 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 
@@ -97,8 +98,36 @@ Redis : hotel:*   （库存缓存 hotel:inv、幂等键 hotel:idem、延迟队�
 
 **`Set-StrictMode -Version 1.0`** 已开在 `_testlib.ps1` 里。PowerShell 默认把未声明变量当 `$null` —— 拼错一个变量名（比如写了 `$f22` 却从没声明）会静默传空串下去，最后报的是服务端 400，离真凶很远。开了 strict mode 就会直接指着那一行报错。
 
-**变量名不要叫 `$fail`**：公共库里 `$script:fail` 是断言失败计数器，脚本里再定义一个 `$fail` 会把它覆盖成 PSObject，然后 `$script:fail++` 就会报 "operand is a PSObject"。
+**变量名不要撞公共库。** PowerShell 的变量名**不区分大小写**，脚本里写个 `$fail = ...` 或 `$base = ...` 会直接覆盖掉库里的同名变量：
+
+| 撞了谁 | 症状 |
+|---|---|
+| `$fail`（断言失败计数器） | `$script:fail++` 报 `operand is a PSObject`，计数乱掉 |
+| `$base`（API 地址 `$script:Base`） | **所有请求变成 `HTTP -1`**，报错只说"连不上"，完全看不出真凶 |
+
+库里占用的名字（测试脚本里别用）：
+
+```
+$Base  $Mysql  $Margs  $Rcli  $DbPort  $RedisPort  $DbPwd  $RedisPwd  $M0  $pass  $fail
+```
+
+`Api` 里加了运行时守卫：一旦发现 `$script:Base` 不再以 `http://` 开头，就直接抛出指名道姓的错误，而不是让你去猜为什么全部请求都失败。
 
 **故意破坏状态之后要修回来。** 有些用例要故意把数据搞脏（比如把 Redis 里某天的库存改成"满"，验证快路径真的在拦请求）。这类用例**用完必须立刻从 DB 修回来**，否则后面的用例一旦用到同一天就会被假数据挡住。
 
 > 踩过：`p1_inventory_cache_test` 的 §5 故意污染了"锚点 +21 天"那天的缓存且没修，当时跨月测试用的是另一天，相安无事；换了个日期后两者**撞到同一天**，跨月下单直接被假数据挡成 409，看起来像功能坏了。
+
+## 语法预检
+
+改完脚本先跑这个（不需要应用在跑）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\check-syntax.ps1
+```
+
+它查两件事：
+
+1. **缺 BOM** —— PS 5.1 按 GBK 读无 BOM 的 UTF-8，中文被打碎后常变出幽灵引号
+2. **语法错误** —— 字符串里混进一对 ASCII 双引号（`"这样"`）会把整行截断
+
+这两种错误**长得一模一样**（都报 `Unexpected token`），肉眼很难分辨。所以检查器把 BOM 缺失单独指出来，别让它伪装成语法错误。

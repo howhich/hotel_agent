@@ -24,7 +24,9 @@ $files = @(
     'p1_inventory_cache_test.ps1',
     'p1_idempotency_test.ps1',
     'p2_delay_queue_test.ps1',
-    'p2_geo_test.ps1'
+    'p2_geo_test.ps1',
+    'p2_nearby_filter_test.ps1',
+    'check-syntax.ps1'
 )
 
 foreach ($f in $files) {
