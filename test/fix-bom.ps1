@@ -26,6 +26,7 @@ $files = @(
     'p2_delay_queue_test.ps1',
     'p2_geo_test.ps1',
     'p2_nearby_filter_test.ps1',
+    'p2_cleanup_test.ps1',
     'check-syntax.ps1'
 )
 

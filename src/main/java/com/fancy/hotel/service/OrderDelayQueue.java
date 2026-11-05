@@ -15,7 +15,9 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 订单超时延迟队列（Redis ZSet）
@@ -201,6 +203,74 @@ public class OrderDelayQueue {
         }
         log.info("延迟队列重建完成：{} 个待支付订单重新入队", n);
         return n;
+    }
+
+    /**
+     * 清理"已经不该存在"的成员（P2.4）
+     *
+     * <p>正常路径下，订单进入终态时会在事务提交后 {@code ZREM} 掉自己。
+     * 这个方法是兜底：Redis 抖动、订单被直接删掉、或者手工改过数据时，
+     * 队列里可能留下永远不会被处理的成员 —— 它们到点触发只会白跑一趟。
+     *
+     * <p>判断依据：member 对应的订单<b>还处于待支付</b>才保留；
+     * 已终态、不存在、甚至成员本身不是合法数字，都清掉。
+     *
+     * @param batch 本次最多检查多少个成员（从头开始扫）
+     * @return 移除条数
+     */
+    public int purgeStaleMembers(int batch) {
+        int cap = Math.max(1, Math.min(batch, 5000));
+        try {
+            Set<String> members = redis.opsForZSet().range(key(), 0, cap - 1L);
+            if (members == null || members.isEmpty()) {
+                return 0;
+            }
+
+            // 先问 DB：这些 member 里哪些还"活着"
+            List<Long> ids = new ArrayList<>();
+            for (String s : members) {
+                try {
+                    ids.add(Long.valueOf(s));
+                } catch (NumberFormatException ignored) {
+                    // 非法成员：下面统一清掉
+                }
+            }
+            Set<Long> alive = new HashSet<>();
+            if (!ids.isEmpty()) {
+                List<Booking> pendings = bookingMapper.selectList(new LambdaQueryWrapper<Booking>()
+                        .in(Booking::getBookingId, ids)
+                        .eq(Booking::getBookingStatus, BookingStatus.PENDING_PAYMENT.getCode()));
+                for (Booking b : pendings) {
+                    alive.add(b.getBookingId());
+                }
+            }
+
+            int removed = 0;
+            for (String s : members) {
+                Long id = null;
+                try {
+                    id = Long.valueOf(s);
+                } catch (NumberFormatException ignored) {
+                    // id 保持 null，走移除分支
+                }
+                if (id != null && alive.contains(id)) {
+                    continue;   // 还有效，保留
+                }
+                // ★ ZSetOperations.remove() 返回的是 Long（删掉了几个），不是 Boolean。
+                //   写成 Boolean.TRUE.equals(...) 会恒为 false —— 清理悄悄做了、计数却报 0。
+                Long n = redis.opsForZSet().remove(key(), s);
+                if (n != null && n > 0) {
+                    removed++;
+                }
+            }
+            if (removed > 0) {
+                log.info("延迟队列清理：扫了 {} 个成员，移除 {} 个已终态/无效的", members.size(), removed);
+            }
+            return removed;
+        } catch (Exception e) {
+            log.error("延迟队列清理失败（不影响业务，下次再来）", e);
+            return 0;
+        }
     }
 
     private static long nz(Long v) {

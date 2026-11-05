@@ -40,8 +40,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p2_delay_queue_test.ps1` | 延迟队列：入队出队时机 / 回滚不入队 / **到点自动释放** / **重复触发幂等** / **兜底扫表捞回** / 队列重建 / `volatile-lru` 保护 |
 | `p2_geo_test.ps1` | 酒店 GEO：索引为空可辨识 / 重建 / 半径过滤 / **距离用独立 haversine 验算** / 排序 / limit / 参数校验 / 索引丢失可恢复 |
 | `p2_nearby_filter_test.ps1` | 附近酒店：三种排序 / **排序与截断的顺序** / 有房过滤 / 过滤+排序叠加 / roomCount 两条路径 / 半个日期区间报错 |
+| `p2_cleanup_test.ps1` | 定期清理：**过期**幂等记录被删而**未过期**的不许动 / 延迟队列残留（已终态、孤儿、非法成员）被清而有效任务保留 / 清理幂等 |
 
-合计 **173 项断言**。
+合计 **186 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 

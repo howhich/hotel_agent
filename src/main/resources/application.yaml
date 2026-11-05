@@ -83,6 +83,15 @@ hotel:
     # 与其让调用方困惑，不如启动时就建好（5 家酒店，几十毫秒）。
     rebuild-on-startup: true
 
+  # P2.4：定期清理（两类"会无限增长 / 会悄悄残留"的数据）
+  maintenance:
+    # 幂等记录：过期的就没用了（幂等窗口只有 600 秒），每天凌晨 3:30 清一次
+    idempotent-clean-cron: "0 30 3 * * ?"
+    idempotent-batch: 5000
+    # 延迟队列：正常路径在订单终态时已删掉自己，这里只是兜底，每 30 分钟扫一次
+    delay-purge-cron: "0 */30 * * * ?"
+    delay-purge-batch: 1000
+
 logging:
   level:
     com.fancy.hotel: debug
