@@ -92,6 +92,12 @@ hotel:
     delay-purge-cron: "0 */30 * * * ?"
     delay-purge-batch: 1000
 
+  # P3.1：防缓存穿透
+  cache:
+    # 「这个 id 不存在」的记忆时长（秒）。
+    # 刻意很短：万一数据后来真的被创建了，最多 60 秒就自愈，不用人工清缓存。
+    absent-ttl-seconds: 60
+
 logging:
   level:
     com.fancy.hotel: debug

@@ -32,6 +32,7 @@ import com.fancy.hotel.mapper.RoomInventoryMapper;
 import com.fancy.hotel.mapper.RoomPriceMapper;
 import com.fancy.hotel.mapper.RoomTypeMapper;
 import com.fancy.hotel.service.BookingService;
+import com.fancy.hotel.service.AbsentCache;
 import com.fancy.hotel.service.InventoryCacheService;
 import com.fancy.hotel.service.OrderDelayQueue;
 import lombok.RequiredArgsConstructor;
@@ -82,6 +83,7 @@ public class BookingServiceImpl implements BookingService {
     private final BookingInventoryLinkMapper linkMapper;
     private final ObjectMapper objectMapper;
     private final InventoryCacheService inventoryCacheService;
+    private final AbsentCache absentCache;
     private final OrderDelayQueue orderDelayQueue;
 
     @Value("${hotel.booking.pay-timeout-minutes:15}")
@@ -204,8 +206,7 @@ public class BookingServiceImpl implements BookingService {
         if (rt.getHotelId() != null && dto.getHotelId() != null && !rt.getHotelId().equals(dto.getHotelId())) {
             throw BusinessException.badRequest("房型与酒店不匹配");
         }
-        Hotel hotel = hotelMapper.selectOne(new LambdaQueryWrapper<Hotel>()
-                .eq(Hotel::getHotelId, dto.getHotelId()));
+        Hotel hotel = findHotel(dto.getHotelId());
         if (hotel == null) {
             throw BusinessException.notFound("酒店不存在: " + dto.getHotelId());
         }
@@ -723,8 +724,27 @@ public class BookingServiceImpl implements BookingService {
         }
     }
 
+    /**
+     * 按 id 查酒店（查不到返回 null）
+     *
+     * <p>★ 防穿透：查不到的 id 记 60 秒。订单列表里如果引用了已删除的酒店，
+     * 每次刷新列表都会对同一个 id 查一次库 —— 记下来就不用了。
+     *
+     * <p>注意这里<b>只记"不存在"，不缓存酒店本身</b>：写路径（下单）也用这个方法，
+     * 拿到的必须是数据库里的最新数据。
+     */
     private Hotel findHotel(Long hotelId) {
-        return hotelMapper.selectOne(new LambdaQueryWrapper<Hotel>().eq(Hotel::getHotelId, hotelId));
+        if (hotelId == null) {
+            return null;
+        }
+        if (absentCache.isHotelAbsent(hotelId)) {
+            return null;
+        }
+        Hotel h = hotelMapper.selectOne(new LambdaQueryWrapper<Hotel>().eq(Hotel::getHotelId, hotelId));
+        if (h == null) {
+            absentCache.markHotelAbsent(hotelId);
+        }
+        return h;
     }
 
     private BookingVO toVO(Booking b) {
@@ -767,9 +787,15 @@ public class BookingServiceImpl implements BookingService {
         if (bookingId == null) {
             throw BusinessException.badRequest("bookingId 不能为空");
         }
+        // ★ 防穿透：这个 id 刚被查证过不存在，直接在缓存层拒掉，一次 DB 都不碰。
+        //   订单号是雪花 ID，一旦"不存在"就基本不会再出现，记 60 秒是安全的。
+        if (absentCache.isBookingAbsent(bookingId)) {
+            throw BusinessException.notFound("订单不存在: " + bookingId);
+        }
         Booking b = bookingMapper.selectOne(new LambdaQueryWrapper<Booking>()
                 .eq(Booking::getBookingId, bookingId));
         if (b == null) {
+            absentCache.markBookingAbsent(bookingId);
             throw BusinessException.notFound("订单不存在: " + bookingId);
         }
         return b;
@@ -779,9 +805,14 @@ public class BookingServiceImpl implements BookingService {
         if (roomTypeId == null) {
             throw BusinessException.badRequest("roomTypeId 不能为空");
         }
+        // ★ 防穿透：拿不存在的房型反复下单/报价，不该每次都查库
+        if (absentCache.isRoomTypeAbsent(roomTypeId)) {
+            throw BusinessException.notFound("房型不存在: " + roomTypeId);
+        }
         RoomType rt = roomTypeMapper.selectOne(new LambdaQueryWrapper<RoomType>()
                 .eq(RoomType::getRoomTypeId, roomTypeId));
         if (rt == null) {
+            absentCache.markRoomTypeAbsent(roomTypeId);
             throw BusinessException.notFound("房型不存在: " + roomTypeId);
         }
         if (rt.getStatus() == null || rt.getStatus() != 1) {

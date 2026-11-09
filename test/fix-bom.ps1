@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  fix-bom.ps1 -- add UTF-8 BOM to the test scripts under devops\
 #
 #  WHY: Windows PowerShell 5.1 reads BOM-less UTF-8 using the system ANSI
@@ -27,6 +27,7 @@ $files = @(
     'p2_geo_test.ps1',
     'p2_nearby_filter_test.ps1',
     'p2_cleanup_test.ps1',
+    'p3_absent_cache_test.ps1',
     'check-syntax.ps1'
 )
 

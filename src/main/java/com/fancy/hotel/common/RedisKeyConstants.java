@@ -22,6 +22,37 @@ public final class RedisKeyConstants {
     private static final String IDEMPOTENT_PREFIX = "hotel:idem";
     private static final String DELAY_PREFIX = "hotel:delay";
     private static final String GEO_PREFIX = "hotel:geo";
+    private static final String ABSENT_PREFIX = "hotel:absent";
+
+    /**
+     * 「不存在」标记（防缓存穿透）
+     *
+     * <pre>
+     *   hotel:absent:booking:{bookingId}
+     *   hotel:absent:roomtype:{roomTypeId}
+     *   hotel:absent:hotel:{hotelId}
+     * </pre>
+     *
+     * <p>★ 只记「这个 id 查过、确实不存在」，<b>不缓存正本数据</b>。
+     *
+     * <p>这是刻意的克制：如果连正本也缓存，就要处理"数据改了缓存什么时候失效"，
+     * 而且写路径（下单、改期）可能读到过期的 {@code total_rooms}。
+     * 只记"不存在"就没有这些问题 —— 命中正本永远走 DB，拿到的永远是最新的。
+     *
+     * <p>★ TTL 必须短（默认 60 秒）：万一这个 id 之后真的被创建了
+     * （比如后台补录数据），最多 60 秒就自动恢复正常，不需要人工清缓存。
+     */
+    public static String absentBookingKey(long bookingId) {
+        return ABSENT_PREFIX + ":booking:" + bookingId;
+    }
+
+    public static String absentRoomTypeKey(long roomTypeId) {
+        return ABSENT_PREFIX + ":roomtype:" + roomTypeId;
+    }
+
+    public static String absentHotelKey(long hotelId) {
+        return ABSENT_PREFIX + ":hotel:" + hotelId;
+    }
 
     /**
      * 订单超时延迟队列（ZSet）

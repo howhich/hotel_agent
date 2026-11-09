@@ -1,4 +1,4 @@
-# 测试脚本
+﻿# 测试脚本
 
 端到端测试（不是 JUnit 单元测试）。全部用 PowerShell 写，直接打 HTTP 接口 + 查 MySQL/Redis 做交叉验证。
 
@@ -41,8 +41,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p2_geo_test.ps1` | 酒店 GEO：索引为空可辨识 / 重建 / 半径过滤 / **距离用独立 haversine 验算** / 排序 / limit / 参数校验 / 索引丢失可恢复 |
 | `p2_nearby_filter_test.ps1` | 附近酒店：三种排序 / **排序与截断的顺序** / 有房过滤 / 过滤+排序叠加 / roomCount 两条路径 / 半个日期区间报错 |
 | `p2_cleanup_test.ps1` | 定期清理：**过期**幂等记录被删而**未过期**的不许动 / 延迟队列残留（已终态、孤儿、非法成员）被清而有效任务保留 / 清理幂等 |
+| `p3_absent_cache_test.ps1` | 防穿透：查不存在的订单/房型留标记 / **标记期间不再查库**（相对计数证明省了 10 次）/ 真实数据不受影响 / 标记删掉后自愈 / 每个标记都有 TTL |
 
-合计 **186 项断言**。
+合计 **207 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 
