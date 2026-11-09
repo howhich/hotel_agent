@@ -49,8 +49,14 @@ public class HotelGeoIndex {
     @Value("${hotel.nearby.rebuild-on-startup:true}")
     private boolean rebuildOnStartup;
 
-    /** 一条命中：酒店 ID + 直线距离（公里） */
-    public record GeoHit(long hotelId, double distanceKm) {
+    /**
+     * 一条命中：酒店 ID + 直线距离（公里）
+     *
+     * <p>★ {@code distanceKm} 用包装类型 {@code Double} 而不是 {@code double}，
+     * 因为 <b>null 表示"距离未知"，和 0 完全不是一回事</b>。
+     * 0 是合法值 —— 查询中心正好落在某家酒店的坐标上时，距离就是 0（本项目就测过）。
+     */
+    public record GeoHit(long hotelId, Double distanceKm) {
     }
 
     private static String key() {
@@ -137,14 +143,46 @@ public class HotelGeoIndex {
             }
 
             List<GeoHit> hits = new ArrayList<>();
+            int noDistance = 0;
             for (GeoResult<RedisGeoCommands.GeoLocation<String>> r : results.getContent()) {
                 String member = r.getContent().getName();
-                double km = r.getDistance() == null ? 0d : r.getDistance().getValue();
+
+                // ★ 距离必须区分"未知"和"0"。
+                //
+                //   原来的写法是 `getDistance() == null ? 0d : ...`，看着无害，其实是个陷阱：
+                //     - 0 是合法距离（查询中心正好在酒店坐标上）
+                //     - 默认成 0 之后，这条结果会按"距离升序"排到第一个，被当成最近的一家
+                //     - 同时还显示成 "0.0 公里"
+                //   也就是说，兜底兜到了"最不容易被发现"的方向：
+                //   数据是错的，但看起来最合理。
+                //
+                //   而且这个兜底会掩盖真正的配置错误：如果有人重构时把
+                //   includeDistance() 删掉，所有结果都不带距离，整个列表就会按任意
+                //   顺序返回、却对外声称"最近的在前"。
+                //
+                //   所以这里保留 null（= 未知），交给排序把"未知"放到最后，
+                //   并且记一条 warn —— 让它可见，而不是伪装成正常数据。
+                //
+                //   ★ 实测补充（变异测试验过）：把 includeDistance() 去掉之后，
+                //   Spring 并不会返回 null，而是给 Distance(0) —— 也就是"全部 0 公里"。
+                //   这种情况下面的 null 分支根本不会走到。所以真正的守卫是
+                //   p2_geo_test 里那条 "距离为 0 的酒店最多只能有一家"：
+                //   查询中心只可能正好落在某一家酒店的坐标上，出现两家以上就是
+                //   WITHDIST 丢了。
+                Double km = r.getDistance() == null ? null : r.getDistance().getValue();
+                if (km == null) {
+                    noDistance++;
+                }
                 try {
                     hits.add(new GeoHit(Long.parseLong(member), km));
                 } catch (NumberFormatException e) {
                     log.warn("GEO 索引里有非法成员（不是 hotelId），已忽略: {}", member);
                 }
+            }
+            if (noDistance > 0) {
+                log.warn("GEO 返回了 {} 条不带距离的结果（本不该发生）。"
+                        + "最常见的原因是 GEOSEARCH 少了 WITHDIST —— 检查 includeDistance() 是否还在。",
+                        noDistance);
             }
             return hits;
         } catch (Exception e) {

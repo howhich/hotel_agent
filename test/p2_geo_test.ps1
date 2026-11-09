@@ -78,6 +78,15 @@ Check 'widening radius never shrinks the set' (($r1.Body.data.count -le $r5.Body
 
 # ---------------------------------------------------------------------------
 "`n=== 4. ★ 距离数值用独立公式验算 ==="
+
+# 距离 0 是合法的，但只可能有一家 —— 查询中心正好落在它的坐标上。
+# 出现两家以上距离 0，几乎一定是 GEOSEARCH 少了 WITHDIST：
+# 实测（变异测试）Spring 这种情况下不会返回 null，而是给 Distance(0)，
+# 于是所有酒店都变成"0 公里外"，还按任意顺序排在你面前。
+$zeroDist = @($r10.Body.data.hotels | Where-Object { $null -ne $_.distanceKm -and [double]$_.distanceKm -eq 0 }).Count
+"  距离为 0 的酒店数 = $zeroDist （最多 1 家：正好在查询中心的那个）"
+Check 'at most one hotel sits at distance 0' ($zeroDist -le 1) "zero-distance hotels=$zeroDist"
+
 $bad = 0
 foreach ($h in $r10.Body.data.hotels) {
     $lng = [double]$h.longitude

@@ -159,7 +159,8 @@ public class HotelQueryService {
                     .minPrice(h.getMinPrice())
                     .longitude(h.getLongitude())
                     .latitude(h.getLatitude())
-                    .distanceKm(round3(hit.distanceKm()))
+                    // null = 距离未知（GEO 没给），原样传出去，别编一个 0
+                    .distanceKm(hit.distanceKm() == null ? null : round3(hit.distanceKm()))
                     .build());
         }
         return list;
@@ -236,10 +237,22 @@ public class HotelQueryService {
                     .reversed();
             case PRICE -> cmp = Comparator.comparing(
                     (NearbyResultVO.NearbyHotelVO v) -> v.getMinPrice() == null ? HIGH_PRICE : v.getMinPrice());
-            default -> cmp = Comparator.comparing(NearbyResultVO.NearbyHotelVO::getDistanceKm);
+            default -> cmp = Comparator.comparingDouble(HotelQueryService::distKey);
         }
         // 次级排序用距离：同评分 / 同价格时结果稳定且可预期
-        list.sort(cmp.thenComparing(NearbyResultVO.NearbyHotelVO::getDistanceKm));
+        list.sort(cmp.thenComparingDouble(HotelQueryService::distKey));
+    }
+
+    /**
+     * 距离排序用的键
+     *
+     * <p>★ 距离未知（null）当成"非常远"排到最后，<b>绝不能当成 0 排到最前面</b> ——
+     * 那会让一条没有距离的数据伪装成"离你最近"。
+     * 排序用 {@link Double#MAX_VALUE} 兜底，但对外返回的 {@code distanceKm} 仍然是 null，
+     * 前端能看出"这家不知道多远"，而不是被一个假的 0.0 骗过去。
+     */
+    private static double distKey(NearbyResultVO.NearbyHotelVO v) {
+        return v.getDistanceKm() == null ? Double.MAX_VALUE : v.getDistanceKm();
     }
 
     /** 距离保留 3 位小数（米级），避免返回 1.3799999999 这种 */
