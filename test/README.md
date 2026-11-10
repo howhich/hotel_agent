@@ -1,4 +1,4 @@
-﻿# 测试脚本
+# 测试脚本
 
 端到端测试（不是 JUnit 单元测试）。全部用 PowerShell 写，直接打 HTTP 接口 + 查 MySQL/Redis 做交叉验证。
 
@@ -44,8 +44,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p3_absent_cache_test.ps1` | 防穿透：查不存在的订单/房型留标记 / **标记期间不再查库**（相对计数证明省了 10 次）/ 真实数据不受影响 / 标记删掉后自愈 / 每个标记都有 TTL |
 | `p3_single_flight_test.ps1` | 单飞回源：**10 个并发只查 1 次库** / 不超卖（200×3 409×7）/ **无 5xx（无死锁）** / 锁不泄漏 / 别人占锁时仍能服务且不误删别人的锁 |
 | `p3_ttl_jitter_test.ps1` | TTL 抖动：同一时刻建的一批 key **TTL 各不相同**（极差几千秒）/ 都落在 [基础值, 基础值+抖动] / 重建会重新随机 / 抖动不影响缓存命中 / 没有永久的键 |
+| `p3_price_cache_test.ps1` | 价格缓存：第二次报价不查库 / **改价后报价立刻变（失效生效）** / 只失效那一天 / 改价真的落库 / 无价格日期 409 且记占位符不再查库 / 收尾还原种子价 |
 
-合计 **229 项断言**。
+合计 **252 项断言**。
 
 ## 环境变量（换机器时用，不必改脚本）
 
@@ -129,9 +130,12 @@ $Base  $Mysql  $Margs  $Rcli  $DbPort  $RedisPort  $DbPwd  $RedisPwd  $M0  $pass
 powershell -NoProfile -ExecutionPolicy Bypass -File .\check-syntax.ps1
 ```
 
-它查两件事：
+它查三件事：
 
 1. **缺 BOM** —— PS 5.1 按 GBK 读无 BOM 的 UTF-8，中文被打碎后常变出幽灵引号
 2. **语法错误** —— 字符串里混进一对 ASCII 双引号（`"这样"`）会把整行截断
+3. **双引号不成对** —— 这类错误**语法可能仍然合法**（`"a" - "b"` 会被当成减法），报错要到运行时才出现（`Cannot convert value ... to type "System.Int32"`），前两项都抓不到，但引号不成对一定抓得到
 
-这两种错误**长得一模一样**（都报 `Unexpected token`），肉眼很难分辨。所以检查器把 BOM 缺失单独指出来，别让它伪装成语法错误。
+前两种错误**长得一模一样**（都报 `Unexpected token`），肉眼很难分辨。所以检查器把 BOM 缺失单独指出来，别让它伪装成语法错误。
+
+> 中文里请用「」或单引号，不要用 ASCII 的成对双引号 —— 这一条踩过 5 次。

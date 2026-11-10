@@ -3,12 +3,14 @@ package com.fancy.hotel.controller;
 import com.fancy.hotel.common.RedisKeyConstants;
 import com.fancy.hotel.common.Result;
 import com.fancy.hotel.domain.dto.NearbyQueryDTO;
+import com.fancy.hotel.domain.dto.PriceUpdateDTO;
 import com.fancy.hotel.service.HotelGeoIndex;
 import com.fancy.hotel.service.HotelQueryService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -39,6 +41,21 @@ public class HotelController {
     @GetMapping("/nearby")
     public Result nearby(@Valid NearbyQueryDTO q) {
         return Result.ok(hotelQueryService.nearby(q));
+    }
+
+    /**
+     * 改某一天的价格（运维/后台用）
+     *
+     * <pre>
+     *   POST /booking/hotel/price/update
+     *   {"roomTypeId":2001,"stayDate":"2026-11-16","price":500.00}
+     * </pre>
+     *
+     * <p>改完会立刻失效那天的价格缓存，所以下一次报价看到的就是新价。
+     */
+    @PostMapping("/price/update")
+    public Result updatePrice(@Valid @RequestBody PriceUpdateDTO dto) {
+        return Result.ok(hotelQueryService.updatePrice(dto));
     }
 
     /** 从 DB 重建 GEO 索引（下架/新增酒店后跑一次；索引被淘汰后也靠它） */

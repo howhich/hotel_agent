@@ -30,6 +30,7 @@ $files = @(
     'p3_absent_cache_test.ps1',
     'p3_single_flight_test.ps1',
     'p3_ttl_jitter_test.ps1',
+    'p3_price_cache_test.ps1',
     'check-syntax.ps1'
 )
 

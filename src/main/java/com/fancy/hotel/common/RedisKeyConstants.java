@@ -24,6 +24,24 @@ public final class RedisKeyConstants {
     private static final String GEO_PREFIX = "hotel:geo";
     private static final String ABSENT_PREFIX = "hotel:absent";
     private static final String LOCK_PREFIX = "hotel:lock";
+    private static final String PRICE_PREFIX = "hotel:price";
+
+    /**
+     * 价格缓存 bucket：<b>一个房型一个月</b>一个 hash（和库存同一个分桶方式）
+     *
+     * <pre>
+     *   key   hotel:price:{rt:2001}:2026-11   (Hash)
+     *   field 2026-11-16
+     *   value 400.00   ——  或者是 "-"，表示"这天查过了、确实没有价格日历"
+     * </pre>
+     *
+     * <p>★ 那个 {@code "-"} 很关键：不区分"没缓存"和"缓存了但没有价格"，
+     * 那么查一个没有价格日历的日期就会每次都回源查库（穿透）。
+     * 和 P3.1 的 tombstone 是同一个思路。
+     */
+    public static String priceMonthKey(Long roomTypeId, java.time.YearMonth ym) {
+        return PRICE_PREFIX + ":{rt:" + roomTypeId + "}:" + ym;
+    }
 
     /**
      * 库存回源的互斥锁（P3.2 single-flight）

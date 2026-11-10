@@ -106,6 +106,13 @@ hotel:
     inv-load-wait-rounds: 40
     inv-load-wait-interval-ms: 50
 
+  # P3.4：价格日历缓存
+  price:
+    # TTL 刻意短一些（10 分钟）：改价是靠"主动失效"来保证及时的，
+    # TTL 只是兜底 —— 万一失效失败、或撞上缓存回源的竞态，最多错 10 分钟。
+    cache-ttl-seconds: 600
+    cache-ttl-jitter-seconds: 120
+
   # P3.1：防缓存穿透
   cache:
     # 「这个 id 不存在」的记忆时长（秒）。

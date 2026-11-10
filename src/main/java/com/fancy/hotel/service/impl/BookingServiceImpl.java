@@ -35,6 +35,7 @@ import com.fancy.hotel.service.BookingService;
 import com.fancy.hotel.service.AbsentCache;
 import com.fancy.hotel.service.InventoryCacheService;
 import com.fancy.hotel.service.InventoryRowPreparer;
+import com.fancy.hotel.service.PriceCacheService;
 import com.fancy.hotel.service.OrderDelayQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -53,6 +54,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -86,6 +88,7 @@ public class BookingServiceImpl implements BookingService {
     private final InventoryCacheService inventoryCacheService;
     private final AbsentCache absentCache;
     private final InventoryRowPreparer inventoryRowPreparer;
+    private final PriceCacheService priceCacheService;
     private final OrderDelayQueue orderDelayQueue;
 
     @Value("${hotel.booking.pay-timeout-minutes:15}")
@@ -157,22 +160,20 @@ public class BookingServiceImpl implements BookingService {
         int rooms = normalizeRoomCount(roomCount);
 
         List<LocalDate> dates = stayDates(checkIn, checkOut);
-        List<RoomPrice> prices = roomPriceMapper.selectRange(roomTypeId, checkIn, checkOut);
 
-        java.util.Map<LocalDate, RoomPrice> priceMap = new java.util.HashMap<>();
-        for (RoomPrice p : prices) {
-            priceMap.put(p.getStayDate(), p);
-        }
+        // ★ 价格走缓存（P3.4）：这是全项目最热的读路径（报价、下单、改期都要走），
+        //   以前每次都查一次 room_price，一天都省不下来。
+        //   返回的 map 里【每天都有关键字】，值为 null 表示"这天确实没有价格日历"。
+        Map<LocalDate, BigDecimal> priceMap = priceCacheService.getOrLoad(roomTypeId, checkIn, checkOut);
 
         List<PriceQuoteVO.NightPrice> nightPrices = new ArrayList<>(dates.size());
         BigDecimal perRoom = BigDecimal.ZERO;
 
         for (LocalDate d : dates) {
-            RoomPrice p = priceMap.get(d);
-            if (p == null) {
+            BigDecimal price = priceMap.get(d);
+            if (price == null) {
                 throw BusinessException.conflict(d + " 暂未开放预订（缺少价格日历）");
             }
-            BigDecimal price = p.effectivePrice();
             perRoom = perRoom.add(price);
             nightPrices.add(PriceQuoteVO.NightPrice.builder()
                     .stayDate(d)

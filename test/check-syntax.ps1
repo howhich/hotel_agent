@@ -58,6 +58,33 @@ Get-ChildItem $dir -Filter *.ps1 -File | Sort-Object Name | ForEach-Object {
     }
 }
 
+# ---------- 附加检查：每行双引号是否成对 ----------
+#
+# 为什么需要：字符串里混进一对 ASCII 双引号（中文句子里写 "这样"）时，
+# 语法【可能仍然合法】—— 比如 "a" - "b" 会被当成减法，
+# 报错要到运行时才出现（Cannot convert value ... to type "System.Int32"）。
+# 语法检查抓不到，但"引号不成对"一定能抓到。
+$suspicious = @()
+foreach ($f in (Get-ChildItem $dir -Filter *.ps1 -File | Where-Object { $_.Name -ne $self })) {
+    $ls = [IO.File]::ReadAllLines($f.FullName)
+    for ($i = 0; $i -lt $ls.Length; $i++) {
+        $line = $ls[$i]
+        if ($line -match '^\s*#') { continue }          # 纯注释行跳过
+        # here-string 的定界符 @" / "@ 天然只有半个引号，不算可疑
+        if ($line -match '@"\s*$' -or $line -match '^\s*"@\s*$') { continue }
+        $q = ([regex]::Matches($line, '(?<!`)"')).Count   # 排除反引号转义的引号
+        if ($q % 2 -ne 0) {
+            $suspicious += "  {0}:{1}  {2}" -f $f.Name, ($i + 1), $line.Trim()
+        }
+    }
+}
+if ($suspicious.Count -gt 0) {
+    ""
+    "  [WARN] 下面这些行的双引号不成对，极可能把中文句子里的引号写成了 ASCII 双引号："
+    $suspicious | Select-Object -First 12
+    "  （中文里请用 「」 或单引号，不要用 ASCII 的成对双引号）"
+}
+
 ""
 if ($failed -gt 0) {
     "  >>> $checked 个文件，$failed 个有语法错误"

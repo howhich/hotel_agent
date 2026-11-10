@@ -3,13 +3,16 @@ package com.fancy.hotel.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fancy.hotel.common.BusinessException;
 import com.fancy.hotel.domain.dto.NearbyQueryDTO;
+import com.fancy.hotel.domain.dto.PriceUpdateDTO;
 import com.fancy.hotel.domain.entity.Hotel;
 import com.fancy.hotel.domain.entity.RoomInventory;
+import com.fancy.hotel.domain.entity.RoomPrice;
 import com.fancy.hotel.domain.entity.RoomType;
 import com.fancy.hotel.domain.enums.NearbySortBy;
 import com.fancy.hotel.domain.vo.NearbyResultVO;
 import com.fancy.hotel.mapper.HotelMapper;
 import com.fancy.hotel.mapper.RoomInventoryMapper;
+import com.fancy.hotel.mapper.RoomPriceMapper;
 import com.fancy.hotel.mapper.RoomTypeMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +24,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +56,8 @@ public class HotelQueryService {
     private final HotelMapper hotelMapper;
     private final RoomTypeMapper roomTypeMapper;
     private final RoomInventoryMapper roomInventoryMapper;
+    private final RoomPriceMapper roomPriceMapper;
+    private final PriceCacheService priceCacheService;
 
     @Value("${hotel.nearby.default-radius-km:5}")
     private double defaultRadiusKm;
@@ -253,6 +259,52 @@ public class HotelQueryService {
      */
     private static double distKey(NearbyResultVO.NearbyHotelVO v) {
         return v.getDistanceKm() == null ? Double.MAX_VALUE : v.getDistanceKm();
+    }
+
+    // =========================================================================
+    // 改价（P3.4）
+    // =========================================================================
+
+    /**
+     * 改某一天的价格，并<b>立刻失效</b>那一天的缓存
+     *
+     * <h3>顺序很重要</h3>
+     * <pre>
+     *   1. 先写库（DB 是事实来源）
+     *   2. 再删缓存（DEL，不是更新缓存）
+     * </pre>
+     * 删而不是更新，理由和"双写一致性"里的一样：
+     * 更新缓存会被并发写覆盖成旧值，删掉则是"下次读的人自己去库里拿最新的"。
+     *
+     * <h3>缓存没删掉怎么办</h3>
+     * 记一条 warn，并靠 TTL（默认 10 分钟）兜底 —— 不因为缓存问题让改价失败。
+     *
+     * <h3>返回旧价和新价</h3>
+     * 调用方（测试/后台）能直接看出"改没改成功"，不用再查一次。
+     */
+    public Map<String, Object> updatePrice(PriceUpdateDTO dto) {
+        RoomPrice existing = roomPriceMapper.selectOne(new LambdaQueryWrapper<RoomPrice>()
+                .eq(RoomPrice::getRoomTypeId, dto.getRoomTypeId())
+                .eq(RoomPrice::getStayDate, dto.getStayDate()));
+        BigDecimal oldPrice = existing == null ? null : existing.effectivePrice();
+
+        roomPriceMapper.upsertPrice(dto.getRoomTypeId(), dto.getStayDate(), dto.getPrice());
+
+        boolean invalidated = priceCacheService.invalidate(dto.getRoomTypeId(), dto.getStayDate());
+        if (!invalidated) {
+            log.debug("改价时该日期没有缓存，无需失效: rt={}, date={}", dto.getRoomTypeId(), dto.getStayDate());
+        }
+
+        log.info("改价: rt={}, date={}, {} -> {}（缓存已失效={}）",
+                dto.getRoomTypeId(), dto.getStayDate(), oldPrice, dto.getPrice(), invalidated);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("roomTypeId", dto.getRoomTypeId());
+        out.put("stayDate", dto.getStayDate().toString());
+        out.put("oldPrice", oldPrice);
+        out.put("newPrice", dto.getPrice());
+        out.put("cacheInvalidated", invalidated);
+        return out;
     }
 
     /** 距离保留 3 位小数（米级），避免返回 1.3799999999 这种 */
