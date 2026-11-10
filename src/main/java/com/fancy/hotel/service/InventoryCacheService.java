@@ -45,19 +45,31 @@ public class InventoryCacheService {
     private final RoomInventoryMapper roomInventoryMapper;
     private final RedisScript<List> reserveScript;
     private final RedisScript<List> releaseScript;
+    private final DistributedLock lock;
     private final long cacheTtlSeconds;
+    private final long loadLockTtlSeconds;
+    private final int loadWaitRounds;
+    private final long loadWaitIntervalMs;
 
     public InventoryCacheService(
             StringRedisTemplate redis,
             RoomInventoryMapper roomInventoryMapper,
             @Qualifier("inventoryReserveScript") RedisScript<List> reserveScript,
             @Qualifier("inventoryReleaseScript") RedisScript<List> releaseScript,
-            @Value("${hotel.booking.inventory-cache-ttl-seconds:86400}") long cacheTtlSeconds) {
+            DistributedLock lock,
+            @Value("${hotel.booking.inventory-cache-ttl-seconds:86400}") long cacheTtlSeconds,
+            @Value("${hotel.lock.inv-load-ttl-seconds:5}") long loadLockTtlSeconds,
+            @Value("${hotel.lock.inv-load-wait-rounds:3}") int loadWaitRounds,
+            @Value("${hotel.lock.inv-load-wait-interval-ms:50}") long loadWaitIntervalMs) {
         this.redis = redis;
         this.roomInventoryMapper = roomInventoryMapper;
         this.reserveScript = reserveScript;
         this.releaseScript = releaseScript;
+        this.lock = lock;
         this.cacheTtlSeconds = cacheTtlSeconds;
+        this.loadLockTtlSeconds = loadLockTtlSeconds;
+        this.loadWaitRounds = loadWaitRounds;
+        this.loadWaitIntervalMs = loadWaitIntervalMs;
     }
 
     // =========================================================================
@@ -172,9 +184,15 @@ public class InventoryCacheService {
                     // 回源补齐整个区间（HSETNX，不动缓存里已有的值），然后重试一次
                     LocalDate from = Collections.min(dates);
                     LocalDate to = Collections.max(dates).plusDays(1);
-                    int loaded = loadRangeFromDb(roomTypeId, from, to);
-                    log.debug("库存缓存回源: roomTypeId={}, {}~{} 新补 {} 天 (attempt={})",
-                            roomTypeId, from, to, loaded, attempt);
+                    if (attempt == 0) {
+                        // ★ single-flight：同一批并发请求只放一个去查库，其它的等它填好
+                        loadWithSingleFlight(roomTypeId, from, to);
+                    } else {
+                        // 等过了、重试还是缺 —— 不再纠缠，退化成纯 DB 路径（P0 那条路，正确）
+                        log.warn("库存缓存回源后仍缺，退化为纯 DB 路径: roomTypeId={}, {}~{}",
+                                roomTypeId, from, to);
+                        return ReserveResult.miss();
+                    }
                     break;
                 default:
                     log.error("库存预占脚本返回未知状态: {}", res);
@@ -247,6 +265,73 @@ public class InventoryCacheService {
      *
      * @return 新写入的天数
      */
+    /**
+     * ★ 单飞回源（single-flight）：同一个「房型 + 区间」同时缺缓存时，只让一个去查库
+     *
+     * <h3>要解决什么</h3>
+     * 库存缓存的月度桶 24 小时过期，热门房型的桶一过期，可能几十个请求同时
+     * {@code HGET} miss —— <b>每个都去查一次库</b>。
+     * {@code HSETNX} 保证了它们不会互相覆盖（这是 P1 做对的），
+     * 但没阻止"重复查询"：100 个并发 = 100 次同样的 SQL。
+     *
+     * <h3>做法</h3>
+     * <pre>
+     *   抢到锁  -> 自己回源，填好缓存，放锁
+     *   没抢到  -> 说明别人正在回源：睡一小会儿，然后让调用方重试 Lua（通常已经能命中）
+     * </pre>
+     *
+     * <h3>为什么"没抢到"也算成功</h3>
+     * 等待是有上限的（{@code inv-load-wait-rounds × inv-load-wait-interval-ms}，默认 150ms）。
+     * 等完重试 Lua 如果还是 MISS，调用方会<b>退化成纯 DB 路径</b>（P0 那条路，结果仍然正确）。
+     * 也就是说：最坏情况是"这次没享受到缓存"，绝不会卡住、绝不会报错、绝不会丢数据。
+     *
+     * <p>这一点很关键：<b>加锁是为了性能，不是为了正确性</b>。
+     * 所以锁拿不到时该放行，而不是拒绝服务。
+     */
+    private void loadWithSingleFlight(Long roomTypeId, LocalDate from, LocalDate to) {
+        String lockKey = RedisKeyConstants.inventoryLoadLockKey(roomTypeId, from, to);
+        String token = lock.tryLock(lockKey, loadLockTtlSeconds);
+
+        if (token != null) {
+            try {
+                int loaded = loadRangeFromDb(roomTypeId, from, to);
+                log.debug("库存缓存回源[我抢到锁]: roomTypeId={}, {}~{} 新补 {} 天",
+                        roomTypeId, from, to, loaded);
+            } finally {
+                lock.unlock(lockKey, token);
+            }
+            return;
+        }
+
+        // 没抢到锁：别人正在回源，等它填好。
+        //
+        // ★ 不能"死睡固定时长"：持有者要查一次库，耗时不定（本项目 DB 走 SSH 隧道，
+        //   一次查询就要好几百毫秒）。睡 150ms 就放弃的话，等待者会在持有者填完之前
+        //   全部退化成纯 DB 路径 —— single-flight 等于白做（实测就是这样）。
+        //
+        //   所以换成"边等边看"：每轮先检查最后一天有没有写进去
+        //   （持有者是按日期升序写的，最后一天出现就等于它写完了），
+        //   写完立刻走，没写完就再等一小会儿，最多等 rounds × interval（默认 2 秒）。
+        LocalDate lastDay = to.minusDays(1);
+        String lastKey = RedisKeyConstants.inventoryMonthKey(roomTypeId, lastDay);
+        long interval = Math.max(1, loadWaitIntervalMs);
+        long waited = 0;
+        for (int i = 0; i < Math.max(1, loadWaitRounds); i++) {
+            if (Boolean.TRUE.equals(redis.opsForHash().hasKey(lastKey, lastDay.toString()))) {
+                break;   // 别人写完了，赶紧去重试 Lua
+            }
+            try {
+                Thread.sleep(interval);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            waited += interval;
+        }
+        log.debug("库存缓存回源[等别人]: roomTypeId={}, {}~{} 等了 {}ms",
+                roomTypeId, from, to, waited);
+    }
+
     public int loadRangeFromDb(Long roomTypeId, LocalDate from, LocalDate to) {
         Map<LocalDate, Integer> soldMap = querySoldMap(roomTypeId, from, to);
         int created = 0;

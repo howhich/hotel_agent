@@ -92,6 +92,16 @@ hotel:
     delay-purge-cron: "0 */30 * * * ?"
     delay-purge-batch: 1000
 
+  # P3.2：分布式锁（只用于"回源单飞"，不是业务互斥锁）
+  lock:
+    # 锁的保命 TTL（秒）。持有者挂了也不会永不过期，到点自动放。
+    inv-load-ttl-seconds: 5
+    # 没抢到锁时最多等几轮、每轮多久。
+    # 每轮都会先看"持有者写完了没"，写完就立刻走，所以这只是**上限**而不是固定开销。
+    # 40 × 50ms = 2s：够慢速 DB 填完，又不至于让请求卡太久。
+    inv-load-wait-rounds: 40
+    inv-load-wait-interval-ms: 50
+
   # P3.1：防缓存穿透
   cache:
     # 「这个 id 不存在」的记忆时长（秒）。

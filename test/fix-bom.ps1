@@ -28,6 +28,7 @@ $files = @(
     'p2_nearby_filter_test.ps1',
     'p2_cleanup_test.ps1',
     'p3_absent_cache_test.ps1',
+    'p3_single_flight_test.ps1',
     'check-syntax.ps1'
 )
 

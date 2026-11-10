@@ -23,6 +23,29 @@ public final class RedisKeyConstants {
     private static final String DELAY_PREFIX = "hotel:delay";
     private static final String GEO_PREFIX = "hotel:geo";
     private static final String ABSENT_PREFIX = "hotel:absent";
+    private static final String LOCK_PREFIX = "hotel:lock";
+
+    /**
+     * 库存回源的互斥锁（P3.2 single-flight）
+     *
+     * <pre>
+     *   hotel:lock:inv:{roomTypeId}:{from}:{to}
+     * </pre>
+     *
+     * <p>粒度是「房型 + 日期区间」：同一批并发请求（同一个房型、同样的日期）
+     * 同时发现缓存缺失时，只有抢到锁的那个去查库，其它的等它填好。
+     *
+     * <p>为什么不按「房型 + 月份」加锁：{@code loadRangeFromDb} 是用
+     * <b>一条 SQL</b> 把整个区间查出来再逐天写入的，锁的粒度和查询的粒度要对上，
+     * 否则一个区间会去抢好几把锁（还要处理加锁顺序防死锁）。
+     *
+     * <p>单实例下这个 key 只是"进程内互斥的跨进程版"，无所谓。
+     * 将来上 Redis Cluster 时，需要给 roomTypeId 加 hash tag（{@code {2001}}），
+     * 否则跨 slot。
+     */
+    public static String inventoryLoadLockKey(Long roomTypeId, java.time.LocalDate from, java.time.LocalDate to) {
+        return LOCK_PREFIX + ":inv:" + roomTypeId + ":" + from + ":" + to;
+    }
 
     /**
      * 「不存在」标记（防缓存穿透）

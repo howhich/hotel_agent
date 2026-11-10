@@ -34,6 +34,7 @@ import com.fancy.hotel.mapper.RoomTypeMapper;
 import com.fancy.hotel.service.BookingService;
 import com.fancy.hotel.service.AbsentCache;
 import com.fancy.hotel.service.InventoryCacheService;
+import com.fancy.hotel.service.InventoryRowPreparer;
 import com.fancy.hotel.service.OrderDelayQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -84,6 +85,7 @@ public class BookingServiceImpl implements BookingService {
     private final ObjectMapper objectMapper;
     private final InventoryCacheService inventoryCacheService;
     private final AbsentCache absentCache;
+    private final InventoryRowPreparer inventoryRowPreparer;
     private final OrderDelayQueue orderDelayQueue;
 
     @Value("${hotel.booking.pay-timeout-minutes:15}")
@@ -239,10 +241,20 @@ public class BookingServiceImpl implements BookingService {
         }
 
         // ---------- ★ 逐天占库存（DB 才是裁决者）----------
-        for (LocalDate d : dates) {
-            // 惰性初始化该天的库存行（幂等，靠 UNIQUE 约束）
-            roomInventoryMapper.insertIgnore(dto.getRoomTypeId(), d, rt.getTotalRooms());
+        //
+        // ★ 先把缺的库存行建好，而且必须在【事务之外】建。
+        //
+        //   原来是在事务里 INSERT IGNORE 再 UPDATE，并发下单同一天时会死锁：
+        //     InnoDB 插入重复键会给已存在的行加【共享锁 S】，
+        //     紧接着的 UPDATE 又要把同一行升级成【排他锁 X】——
+        //     两个事务各持一个 S、各等对方先放，InnoDB 只能回滚其中一个。
+        //   （实测触发过，报错是 DeadlockLoserDataAccessException，500 给到用户）
+        //
+        //   改成事务外建行之后，事务内只剩"按日期升序的 UPDATE"，
+        //   所有事务加锁顺序一致，不可能成环 —— 死锁从根上消失。
+        inventoryRowPreparer.ensureRows(dto.getRoomTypeId(), dates, rt.getTotalRooms());
 
+        for (LocalDate d : dates) {
             // 条件扣减：够才扣
             int updated = roomInventoryMapper.tryOccupy(dto.getRoomTypeId(), d, roomCount);
             if (updated == 0) {

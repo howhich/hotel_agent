@@ -39,6 +39,18 @@ public class RedisScripts {
     }
 
     /**
+     * 分布式锁：安全释放（比对 token 之后才删）
+     *
+     * <p>「先 GET 比对、再 DEL」绝不能分成两条命令 —— 中间锁可能刚好过期并被别人抢到，
+     * 那一下就会删掉别人的锁。
+     */
+    @Bean
+    @SuppressWarnings("rawtypes")
+    public RedisScript<List> lockUnlockScript() {
+        return RedisScript.of(new ClassPathResource("lua/lock_unlock.lua"), List.class);
+    }
+
+    /**
      * 订单超时延迟队列：原子认领到期任务
      *
      * <p>「取 + 删」在一个脚本里 = 谁删掉谁处理，多实例安全。
