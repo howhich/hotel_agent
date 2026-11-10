@@ -11,6 +11,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.concurrent.ThreadLocalRandom;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
@@ -47,6 +48,7 @@ public class InventoryCacheService {
     private final RedisScript<List> releaseScript;
     private final DistributedLock lock;
     private final long cacheTtlSeconds;
+    private final long cacheTtlJitterSeconds;
     private final long loadLockTtlSeconds;
     private final int loadWaitRounds;
     private final long loadWaitIntervalMs;
@@ -58,6 +60,7 @@ public class InventoryCacheService {
             @Qualifier("inventoryReleaseScript") RedisScript<List> releaseScript,
             DistributedLock lock,
             @Value("${hotel.booking.inventory-cache-ttl-seconds:86400}") long cacheTtlSeconds,
+            @Value("${hotel.booking.inventory-cache-ttl-jitter-seconds:3600}") long cacheTtlJitterSeconds,
             @Value("${hotel.lock.inv-load-ttl-seconds:5}") long loadLockTtlSeconds,
             @Value("${hotel.lock.inv-load-wait-rounds:3}") int loadWaitRounds,
             @Value("${hotel.lock.inv-load-wait-interval-ms:50}") long loadWaitIntervalMs) {
@@ -67,6 +70,7 @@ public class InventoryCacheService {
         this.releaseScript = releaseScript;
         this.lock = lock;
         this.cacheTtlSeconds = cacheTtlSeconds;
+        this.cacheTtlJitterSeconds = cacheTtlJitterSeconds;
         this.loadLockTtlSeconds = loadLockTtlSeconds;
         this.loadWaitRounds = loadWaitRounds;
         this.loadWaitIntervalMs = loadWaitIntervalMs;
@@ -332,6 +336,33 @@ public class InventoryCacheService {
                 roomTypeId, from, to, waited);
     }
 
+    /**
+     * ★ 带抖动的缓存 TTL（防"缓存雪崩"）
+     *
+     * <h3>为什么不能统一给 86400 秒</h3>
+     * 所有这些 key 都是<b>懒加载</b>的：第一次被访问时才创建、同时设置过期时间。
+     * 如果 TTL 是个固定值，那么"在同一个时间段被创建的一批 key"会在
+     * <b>同一个时间段一起过期</b> —— 冷启动后集中访问、或一次性重建一批房型，
+     * 就会造出这种"同生同死"的批次。到点它们同时失效，请求同时穿透到 DB，
+     * 这就是雪崩（和击穿的区别：击穿是<b>一个热点</b>，雪崩是<b>一大批同时</b>）。
+     *
+     * <h3>做法：加一段随机量，把过期时间摊开</h3>
+     * <pre>
+     *   TTL = 基础值 + random(0, 抖动上限)
+     *   默认  86400 + random(0, 3600)  =>  24h ~ 25h 之间随机
+     * </pre>
+     * 一批 key 的过期时间就被摊到一个小时里，而不是砸在同一秒。
+     *
+     * <h3>为什么用"加"而不是"加减"</h3>
+     * 加法保证 TTL 永远不短于基础值 —— 抖动只可能让缓存活得更久一点，
+     * 不会因为抖动把刚填好的缓存提前弄没。
+     */
+    private Duration cacheTtl() {
+        long base = Math.max(1, cacheTtlSeconds);
+        long jitter = Math.max(0, cacheTtlJitterSeconds);
+        long extra = jitter == 0 ? 0 : ThreadLocalRandom.current().nextLong(jitter + 1);
+        return Duration.ofSeconds(base + extra);
+    }
     public int loadRangeFromDb(Long roomTypeId, LocalDate from, LocalDate to) {
         Map<LocalDate, Integer> soldMap = querySoldMap(roomTypeId, from, to);
         int created = 0;
@@ -342,7 +373,7 @@ public class InventoryCacheService {
             if (Boolean.TRUE.equals(isNew)) {
                 created++;
             }
-            redis.expire(key, Duration.ofSeconds(cacheTtlSeconds));
+            redis.expire(key, cacheTtl());
         }
         return created;
     }
@@ -361,7 +392,7 @@ public class InventoryCacheService {
         for (LocalDate d = from; d.isBefore(to); d = d.plusDays(1)) {
             String key = RedisKeyConstants.inventoryMonthKey(roomTypeId, d);
             redis.opsForHash().put(key, d.toString(), String.valueOf(soldMap.getOrDefault(d, 0)));
-            redis.expire(key, Duration.ofSeconds(cacheTtlSeconds));
+            redis.expire(key, cacheTtl());
             n++;
         }
         return n;
