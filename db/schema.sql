@@ -2,7 +2,7 @@
 --  hotel-booking  数据库结构 —— 【P0 阶段】
 --  MySQL 8.0 / utf8mb4 / utf8mb4_unicode_ci
 --
---  部署位置: 服务器 43.142.27.106 的 taxi-mysql 容器
+--  部署位置: 服务器 <your-server> 的 taxi-mysql 容器
 --            本地经 SSH 隧道访问  ->  127.0.0.1:13306
 --
 --  重新初始化（**会删掉全部数据**）:

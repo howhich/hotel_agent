@@ -12,7 +12,7 @@ spring:
   application:
     name: hotel-booking
 
-  # 数据库在服务器 43.142.27.106 的 mysql 容器里
+  # 数据库在服务器 <your-server> 的 mysql 容器里
   #   远端 127.0.0.1:3306  ->  SSH 隧道  ->  本地 127.0.0.1:13306
   # 隧道断了应用就连不上库（重启应用即可恢复）
   #
