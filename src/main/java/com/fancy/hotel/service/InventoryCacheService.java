@@ -321,7 +321,19 @@ public class InventoryCacheService {
         long interval = Math.max(1, loadWaitIntervalMs);
         long waited = 0;
         for (int i = 0; i < Math.max(1, loadWaitRounds); i++) {
-            if (Boolean.TRUE.equals(redis.opsForHash().hasKey(lastKey, lastDay.toString()))) {
+            boolean ready;
+            try {
+                ready = Boolean.TRUE.equals(redis.opsForHash().hasKey(lastKey, lastDay.toString()));
+            } catch (Exception e) {
+                // ★ Redis 超时/不可用：等待已经没有意义了，直接让调用方去重试或降级。
+                //
+                //   这里原来【没有 try/catch】—— Redis 一超时，整个下单就变成 500。
+                //   缓存相关的每一次 Redis 调用都必须能降级：缓存的职责是加速，
+                //   它坏了应该退化成"慢"，绝不能变成"错"。
+                log.warn("等待回源时读缓存失败（放弃等待，交给调用方重试/降级）: {}", e.getMessage());
+                break;
+            }
+            if (ready) {
                 break;   // 别人写完了，赶紧去重试 Lua
             }
             try {
@@ -366,14 +378,22 @@ public class InventoryCacheService {
     public int loadRangeFromDb(Long roomTypeId, LocalDate from, LocalDate to) {
         Map<LocalDate, Integer> soldMap = querySoldMap(roomTypeId, from, to);
         int created = 0;
-        for (LocalDate d = from; d.isBefore(to); d = d.plusDays(1)) {
-            String key = RedisKeyConstants.inventoryMonthKey(roomTypeId, d);
-            Boolean isNew = redis.opsForHash().putIfAbsent(key, d.toString(),
-                    String.valueOf(soldMap.getOrDefault(d, 0)));
-            if (Boolean.TRUE.equals(isNew)) {
-                created++;
+        // ★ 写缓存失败不能影响业务：这里只是"顺便把缓存填上"，
+        //   DB 已经查到了，调用方拿着结果照样能干活。
+        //   （Redis 抖动时如果让异常穿透出去，一次缓存写入失败就会变成下单 500 —— P4.2 期间实测到。）
+        try {
+            for (LocalDate d = from; d.isBefore(to); d = d.plusDays(1)) {
+                String key = RedisKeyConstants.inventoryMonthKey(roomTypeId, d);
+                Boolean isNew = redis.opsForHash().putIfAbsent(key, d.toString(),
+                        String.valueOf(soldMap.getOrDefault(d, 0)));
+                if (Boolean.TRUE.equals(isNew)) {
+                    created++;
+                }
+                redis.expire(key, cacheTtl());
             }
-            redis.expire(key, cacheTtl());
+        } catch (Exception e) {
+            log.warn("回源写缓存失败（数据已查到，本次不填缓存）: rt={}, {}~{}, err={}",
+                    roomTypeId, from, to, e.getMessage());
         }
         return created;
     }

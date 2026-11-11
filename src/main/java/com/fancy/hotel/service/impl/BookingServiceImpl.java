@@ -322,6 +322,16 @@ public class BookingServiceImpl implements BookingService {
 
     @Override
     public List<BookingVO> listByUser(Long userId) {
+        // ★ P4.2：路径里的 userId 是"要看谁的订单"，必须和当前登录用户一致。
+        //   没有这个校验的话，前端改一下 URL 就能看别人的全部订单。
+        //   ADMIN / SUPPORT 例外。
+        if (!UserContext.isPrivileged()) {
+            Long me = UserContext.requireUserId();
+            if (!me.equals(userId)) {
+                log.warn("越权查询订单列表: 当前用户 {} 想看 {} 的订单", me, userId);
+                throw BusinessException.forbidden("无权查看别人的订单");
+            }
+        }
         List<Booking> list = bookingMapper.selectList(new LambdaQueryWrapper<Booking>()
                 .eq(Booking::getUserId, userId)
                 .orderByDesc(Booking::getCreateTime));
@@ -799,6 +809,20 @@ public class BookingServiceImpl implements BookingService {
                 .build();
     }
 
+    /**
+     * 按 id 取订单，<b>并校验它是不是当前用户的</b>（P4.2）
+     *
+     * <p>★ 归属校验刻意放在这里，而不是四个入口各写一遍：
+     * 用户侧只有四个入口——查询 / 支付 / 取消 / 改期——全都走这个方法。
+     * 写一次就全覆盖，以后新增入口也不会漏掉。这就是"默认安全"的设计：
+     * 想绕过校验，必须特意去用 mapper。
+     *
+     * <p>ADMIN / SUPPORT 例外：客服本来就要能处理别人的订单。
+     *
+     * <p>⚠️ <b>内部路径不要用这个方法</b>：定时任务、超时释放这些场景没有登录用户，
+     * {@code UserContext.requireUserId()} 会直接抛 401。
+     * （{@code expireBooking} 就是自己查 mapper 的。）
+     */
     private Booking requireBooking(Long bookingId) {
         if (bookingId == null) {
             throw BusinessException.badRequest("bookingId 不能为空");
@@ -814,7 +838,29 @@ public class BookingServiceImpl implements BookingService {
             absentCache.markBookingAbsent(bookingId);
             throw BusinessException.notFound("订单不存在: " + bookingId);
         }
+        assertOwnership(b);
         return b;
+    }
+
+    /**
+     * 校验订单归属，越权抛 <b>403</b>
+     *
+     * <p>为什么用 403 而不是 404：
+     * 404 更"安全"（不泄露这个订单号是否存在），但订单号是雪花 ID、不可枚举，
+     * 泄露"存在性"的价值很低；而 403 对前端提示和排查更友好
+     * （"这不是你的单" vs "单不存在"是两件完全不同的事）。
+     */
+    private void assertOwnership(Booking b) {
+        if (UserContext.isPrivileged()) {
+            return;   // ADMIN / SUPPORT 可以操作任何人的订单
+        }
+        Long me = UserContext.requireUserId();
+        Long owner = b.getUserId();
+        if (!me.equals(owner)) {
+            log.warn("越权拦截: 当前用户 {} 试图操作订单 {}（属于 {}）",
+                    me, b.getBookingId(), owner);
+            throw BusinessException.forbidden("无权操作别人的订单");
+        }
     }
 
     private RoomType requireRoomType(Long roomTypeId) {

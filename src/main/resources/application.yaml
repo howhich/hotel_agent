@@ -40,8 +40,13 @@ spring:
       host: ${REDIS_HOST:127.0.0.1}
       port: ${REDIS_PORT:16379}
       password: ${REDIS_PASSWORD:dzkjdx}
-      timeout: 3000ms
-      connect-timeout: 3000ms
+      # ★ 3 秒是 Lettuce 的默认值，对本项目的【开发环境】太紧：
+      #   本地经 SSH 隧道访问服务器 Redis，十几路并发时单条命令可能排队好几秒。
+      #   而超时会连锁反应：token 校验失败 -> 401，缓存回源失败 -> 500。
+      #   放宽到 10 秒，让它容忍隧道抖动。
+      #   （生产环境 Redis 在本机/同机房，3 秒很宽松，可以调回来。）
+      timeout: 10000ms
+      connect-timeout: 5000ms
 
 mybatis-plus:
   configuration:
