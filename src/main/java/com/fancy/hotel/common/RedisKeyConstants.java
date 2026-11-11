@@ -26,6 +26,25 @@ public final class RedisKeyConstants {
     private static final String LOCK_PREFIX = "hotel:lock";
     private static final String PRICE_PREFIX = "hotel:price";
     private static final String TOKEN_PREFIX = "hotel:token";
+    private static final String AGENT_PREFIX = "hotel:agent";
+
+    /**
+     * Agent 会话状态（P4.3）：JSON，存意图 / 已收集的槽位 / 最近几轮对话 / 待确认的草案
+     *
+     * <pre>
+     *   key   hotel:agent:session:{sessionId}
+     *   TTL   30 分钟（每次对话续期）
+     * </pre>
+     *
+     * <p>为什么放 Redis 而不是内存：应用重启 / 多实例之后会话还在，
+     * 而且本来就有 Redis。
+     *
+     * <p>⚠️ 它和延迟队列一样是"待办状态"而不是"派生数据"：丢了用户就得重新说一遍，
+     * 不会造成数据错误，但体验会断。
+     */
+    public static String agentSessionKey(String sessionId) {
+        return AGENT_PREFIX + ":session:" + sessionId;
+    }
 
     /**
      * 登录 token -> 用户信息（P4.1）

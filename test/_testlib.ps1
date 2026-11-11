@@ -93,9 +93,15 @@ $script:Token = $null
 
 function Login([string]$username = 'testuser', [string]$password = '123456') {
     $r = Api POST '/auth/login' (JsonBody @{ username = $username; password = $password })
-    if ($r.Http -eq 200 -and $r.Body.data) {
-        $script:Token = $r.Body.data.token
+    if ($r.Http -ne 200 -or -not $r.Body.data) {
+        # ★ 以前这里是"失败了就算了"，后果很严重：
+        #   ResetTestData 会先清掉 hotel:*（连 token 一起删），如果重新登录失败却没人吭声，
+        #   后面几十个断言会集体失败、每条都是空的 actual —— 看起来像"业务代码全坏了"。
+        #   宁可在这里炸，也不要制造 66 个假的失败（实测踩过一次）。
+        throw ("登录失败（$username）：HTTP $($r.Http) $($r.Body.message)！" +
+               "如果应用刚重启或 Redis 抖动，重跑一次通常就好。")
     }
+    $script:Token = $r.Body.data.token
     return $r
 }
 
@@ -220,7 +226,19 @@ function ResetTestData {
         }
     }
     # ★ 上面清了 hotel:* —— 里面包含 hotel:token:*
-    #   所以 token 一起被删掉了，必须重新登录，否则后面每个请求都会 401
-    Login | Out-Null
-    return $n
+    #   所以 token 一起被删掉了，必须重新登录，否则后面每个请求都会 401。
+    #
+    #   这里重试 3 次：本项目的 Redis 走 SSH 隧道，偶发超时会让登录失败一次。
+    #   重试仍然失败就【抛错】—— 不要静默返回，那样会让后面的断言集体莫名失败。
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Login | Out-Null
+            return $n
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 3) { Start-Sleep -Milliseconds 600 }
+        }
+    }
+    throw "ResetTestData 之后重新登录失败（已重试 3 次）：$($lastError.Exception.Message)"
 }

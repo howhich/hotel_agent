@@ -111,6 +111,19 @@ hotel:
     inv-load-wait-rounds: 40
     inv-load-wait-interval-ms: 50
 
+  # P4.3：Agent（大模型）
+  agent:
+    # ★ 没设这个环境变量也能启动，只是 /agent/chat 会返回 503。
+    #   值不要写进仓库 —— 见 devops/local-env.ps1（仓库外）。
+    api-key: ${DEEPSEEK_API_KEY:}
+    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+    model: ${DEEPSEEK_MODEL:deepseek-chat}
+    timeout-seconds: 60
+    # 会话状态在 Redis 里放多久
+    session-ttl-seconds: 1800
+    # 送给模型的历史轮数（太多会白花钱）
+    max-history-turns: 10
+
   # P3.4：价格日历缓存
   price:
     # TTL 刻意短一些（10 分钟）：改价是靠"主动失效"来保证及时的，
