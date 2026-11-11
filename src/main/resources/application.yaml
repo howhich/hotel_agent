@@ -123,6 +123,9 @@ hotel:
     session-ttl-seconds: 1800
     # 送给模型的历史轮数（太多会白花钱）
     max-history-turns: 10
+    # 草案多久之后不敢用了（分钟）。草案是"某一刻的房态+价格"，
+    # 放太久再确认，用户可能按旧价预期却按新价付钱 —— 过期就让他重查。
+    draft-ttl-minutes: 5
 
   # P3.4：价格日历缓存
   price:

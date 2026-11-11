@@ -3,10 +3,15 @@ package com.fancy.hotel.service.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fancy.hotel.common.BusinessException;
+import com.fancy.hotel.common.UserContext;
+import com.fancy.hotel.domain.agent.AgentDraft;
 import com.fancy.hotel.domain.agent.AgentSession;
+import com.fancy.hotel.domain.dto.CreateBookingDTO;
 import com.fancy.hotel.domain.dto.AgentChatDTO;
 import com.fancy.hotel.domain.vo.AgentReplyVO;
+import com.fancy.hotel.service.BookingService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -48,16 +53,23 @@ public class AgentService {
     private final LlmClient llmClient;
     private final AgentSessionStore sessionStore;
     private final HotelSearchTool searchTool;
+    private final BookingService bookingService;
     private final ObjectMapper objectMapper;
+    /** 草案多久之后就不算数了（分钟） */
+    private final int draftTtlMinutes;
 
     public AgentService(LlmClient llmClient,
                         AgentSessionStore sessionStore,
                         HotelSearchTool searchTool,
-                        ObjectMapper objectMapper) {
+                        BookingService bookingService,
+                        ObjectMapper objectMapper,
+                        @Value("${hotel.agent.draft-ttl-minutes:5}") int draftTtlMinutes) {
         this.llmClient = llmClient;
         this.sessionStore = sessionStore;
         this.searchTool = searchTool;
+        this.bookingService = bookingService;
         this.objectMapper = objectMapper;
+        this.draftTtlMinutes = Math.max(1, draftTtlMinutes);
     }
 
     // =========================================================================
@@ -85,6 +97,7 @@ public class AgentService {
         AgentReplyVO reply;
         switch (router.intent) {
             case "BOOK", "QUERY" -> reply = handleSearch(session);
+            case "CONFIRM" -> reply = handleConfirm(session);
             case "CANCEL" -> reply = plain(session, "UNSUPPORTED",
                     "取消订单我暂时还不会帮你办，可以在「我的订单」里直接取消。"
                             + "（自助取消接口是现成的，Agent 这一版先只做预订）");
@@ -110,7 +123,7 @@ public class AgentService {
                 + "（星期" + today.getDayOfWeek().getValue() + "）。\n"
                 + "把「用户这句话」结合「已知信息」解析成 JSON，只输出 JSON，不要解释、不要 markdown 代码块。\n"
                 + "字段：\n"
-                + "- intent: BOOK(要订房) / QUERY(只是想查) / CANCEL(取消) / RESCHEDULE(改期) / CHITCHAT(闲聊)\n"
+                + "- intent: BOOK(要订房) / QUERY(只是想查) / CANCEL(取消) / RESCHEDULE(改期)\n-         CONFIRM(确认下单：\\n"
                 + "- slots.city: 城市名，如 \"杭州\"；没有就 null\n"
                 + "- slots.checkIn: \"YYYY-MM-DD\"；相对日期按今天换算；没有就 null\n"
                 + "- slots.checkOut: \"YYYY-MM-DD\"；\"住两晚\" => 离店 = 入住 + 2 天；没有就 null\n"
@@ -224,8 +237,18 @@ public class AgentService {
         List<AgentReplyVO.Candidate> top = found.size() > 3 ? found.subList(0, 3) : found;
         AgentReplyVO.Candidate best = top.get(0);
 
-        // P4.4 会拿这个草案去确认；P4.3 只存下来
-        session.setDraftJson(toJson(best));
+        // ★ 存成完整的草案：确认时用它下单，而不是重新解析用户那句话
+        session.setDraftJson(toJson(AgentDraft.builder()
+                .hotelId(best.getHotelId())
+                .hotelName(best.getHotelName())
+                .roomTypeId(best.getRoomTypeId())
+                .roomTypeName(best.getRoomTypeName())
+                .checkIn(checkIn)
+                .checkOut(checkOut)
+                .roomCount(roomCount)
+                .totalAmount(best.getTotalAmount())
+                .createdAt(System.currentTimeMillis())
+                .build()));
 
         StringBuilder sb = new StringBuilder();
         sb.append("找到 ").append(found.size()).append(" 个可订的房型。");
@@ -257,6 +280,96 @@ public class AgentService {
                 .candidates(top)
                 .reply(sb.toString())
                 .build();
+    }
+
+    // =========================================================================
+    // ★ 第 ⑤ 步：确认下单（HITL —— Human In The Loop）
+    // =========================================================================
+
+    /**
+     * 用户确认后真正下单
+     *
+     * <h3>★ 三条安全线</h3>
+     * <ol>
+     *   <li><b>下单内容只来自草案</b>，不来自用户这句话、也不来自模型。
+     *       否则"订那个 100 块的"就能把订单引到别处去。</li>
+     *   <li><b>身份只来自登录上下文</b>（{@link UserContext}），模型永远不参与。</li>
+     *   <li><b>草案用完即作废</b>，避免连点两次"确认"下两单。
+     *       （还有一层网：{@code @Idempotent} 会让重放的请求拿回同一个订单号）</li>
+     * </ol>
+     *
+     * <h3>为什么"房没了"回 200 而不是 409</h3>
+     * 用户这一轮对话是成功的，只是没订上。把 409 抛给前端会让它以为接口出错了；
+     * 正确做法是让 Agent 说人话："这个房型刚被订走了，我再帮你查？"
+     */
+    private AgentReplyVO handleConfirm(AgentSession session) {
+        String draftJson = session.getDraftJson();
+        if (isBlank(draftJson)) {
+            return plain(session, "NO_DRAFT",
+                    "我这边没有待确认的方案。先说想订哪里的房，我查给你看。");
+        }
+
+        AgentDraft draft;
+        try {
+            draft = objectMapper.readValue(draftJson, AgentDraft.class);
+        } catch (Exception e) {
+            log.warn("草案解析失败: {}", e.getMessage());
+            session.setDraftJson(null);
+            return plain(session, "NO_DRAFT", "刚才那个方案我这边读不出来了，麻烦重新说一下想订什么。");
+        }
+
+        // ---------- 过期检查：草案是"某一刻的房态 + 价格" ----------
+        long ageMs = System.currentTimeMillis() - draft.getCreatedAt();
+        if (ageMs > draftTtlMinutes * 60_000L) {
+            session.setDraftJson(null);
+            long mins = Math.max(1, ageMs / 60_000L);
+            return plain(session, "DRAFT_EXPIRED",
+                    "那个方案是 " + mins + " 分钟前查的，价格和房态可能变了，我不敢直接下单。"
+                            + "要我重新查一遍吗？");
+        }
+
+        // ---------- 真正下单：内容来自草案，身份来自登录上下文 ----------
+        Long userId = UserContext.requireUserId();
+        CreateBookingDTO dto = new CreateBookingDTO();
+        dto.setUserId(userId);          // 只用于幂等指纹；createBooking 内部仍然以 UserContext 为准
+        dto.setHotelId(draft.getHotelId());
+        dto.setRoomTypeId(draft.getRoomTypeId());
+        dto.setCheckIn(draft.getCheckIn());
+        dto.setCheckOut(draft.getCheckOut());
+        dto.setRoomCount(draft.getRoomCount());
+        dto.setGuestCount(1);
+
+        try {
+            Long bookingId = bookingService.createBooking(dto);
+            session.setDraftJson(null);     // 用完即作废
+            session.getSlots().clear();     // 这一单结束了，清空槽位（用户可以接着说下一单）
+            log.info("Agent 确认下单成功: userId={}, bookingId={}, roomTypeId={}",
+                    userId, bookingId, draft.getRoomTypeId());
+
+            String amount = draft.getTotalAmount() == null
+                    ? "?" : draft.getTotalAmount().stripTrailingZeros().toPlainString();
+            return AgentReplyVO.builder()
+                    .sessionId(session.getSessionId())
+                    .intent(session.getIntent())
+                    .stage("BOOKED")
+                    .slots(session.getSlots())
+                    .missing(List.of())
+                    .candidates(List.of())
+                    .bookingId(bookingId)
+                    .reply("订好了！订单号 " + bookingId + "。"
+                            + draft.getHotelName() + " / " + draft.getRoomTypeName() + "，"
+                            + draft.getCheckIn() + " 到 " + draft.getCheckOut() + "，"
+                            + draft.getRoomCount() + " 间，共 ¥" + amount
+                            + "。请在 15 分钟内完成支付，超时会自动释放房间。")
+                    .build();
+        } catch (BusinessException e) {
+            // 房没了 / 价格日历变了 / 被别人抢了 —— 草案作废，让用户重新查
+            session.setDraftJson(null);
+            log.warn("Agent 确认下单失败: userId={}, roomTypeId={}, err={}",
+                    userId, draft.getRoomTypeId(), e.getMessage());
+            return plain(session, "BOOK_FAILED",
+                    "没订上：" + e.getMessage() + "。要我重新查一下还有哪些可订的吗？");
+        }
     }
 
     private AgentReplyVO collecting(AgentSession session, List<String> missing, String text) {

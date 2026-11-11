@@ -1,0 +1,198 @@
+﻿# =============================================================================
+#  p4_agent_hitl_test.ps1 —— 人工确认后下单（P4.4）
+#
+#  验证七件事：
+#   1) 查到候选后，草案被存进会话
+#   2) 说"确认"/"订吧" -> 真的下单，返回订单号，DB 里数据正确
+#   3) ★ 同一轮再确认一次 -> 不会下第二单（草案用完即作废）
+#   4) 说"算了" -> 不下单
+#   5) 没有草案时确认 -> NO_DRAFT（不会瞎订）
+#   6) ★★ 下单内容以【草案】为准，不以用户这句话为准：
+#          草案是 2001 大床房，用户却说"订 2002 那个双床房"
+#          -> 订的必须是 2001（否则"订那个 100 块的"就能把单引走）
+#   7) 草案过期 -> DRAFT_EXPIRED，不敢下单
+#
+#  ★ 没配 key 就跳过（和 p4_agent_test 一样）
+# =============================================================================
+. "$PSScriptRoot\_testlib.ps1"
+
+$RT_BED   = 2001    # 高级大床房（3 间）
+$RT_TWIN  = 2002    # 豪华双床房（2 间）
+$ci  = D 40
+$co  = D 42
+
+function AgentChat([string]$msg, [string]$sid) {
+    $body = @{ message = $msg }
+    if ($sid) { $body['sessionId'] = $sid }
+    return Api POST '/agent/chat' (JsonBody $body)
+}
+function Stage($r) { return "$($r.Body.data.stage)" }
+function SessionKey([string]$sid) { return "hotel:agent:session:$sid" }
+
+"=== 环境 ==="
+"  今天 = $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+
+"`n=== 0. 重置 + 登录 ==="
+ResetTestData | Out-Null
+"  bookings=$(BCount)"
+
+# 没配 key 就跳过
+$probe = AgentChat 'huaxue ceshi' ''
+if ($probe.Http -eq 503) {
+    ""
+    "  [SKIP] Agent 未启用（hotel.agent.api-key 为空），跳过本套件。"
+    ""
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+"`n=== 1. 查候选，草案进入会话 ==="
+$r1 = AgentChat "帮我订杭州 $ci 到 $co 的房，要大床房，1间" ''
+$sid = $r1.Body.data.sessionId
+"  stage=$(Stage $r1)  session=$sid"
+"  reply: $($r1.Body.data.reply)"
+Check 'search reaches SEARCHED' ((Stage $r1) -eq 'SEARCHED') "actual=$(Stage $r1)"
+
+$sessionJson = RedisCmd @('GET', (SessionKey $sid))
+$hasDraft = $sessionJson -like '*draftJson*'
+"  会话里有草案字段: $hasDraft   会话长度 $($sessionJson.Length)"
+Check 'the draft is persisted in the session' $hasDraft ''
+
+# ---------------------------------------------------------------------------
+"`n=== 2. 确认 -> 真的下单 ==="
+$before = [int](BCount)
+$r2 = AgentChat '确认，就它了' $sid
+$after = [int](BCount)
+$newId = $r2.Body.data.bookingId
+"  stage=$(Stage $r2)  bookingId=$newId   订单数 $before -> $after"
+"  reply: $($r2.Body.data.reply)"
+Check 'confirm reaches BOOKED' ((Stage $r2) -eq 'BOOKED') "actual=$(Stage $r2)"
+Check 'a bookingId is returned' ($null -ne $newId -and "$newId".Length -gt 5) "bookingId=$newId"
+Check 'exactly one booking was created' ($after -eq ($before + 1)) "before=$before after=$after"
+
+if ($newId) {
+    $row = Sql "SELECT CONCAT(user_id,'|',room_type_id,'|',check_in,'|',check_out,'|',room_count,'|',booking_status) FROM booking WHERE booking_id=$newId"
+    "  DB: user_id|room_type_id|check_in|check_out|room_count|status = $row"
+    $parts = "$row" -split '\|'
+    Check 'the booking belongs to the logged-in user' ($parts[0] -eq '9001') "userId=$($parts[0])"
+    # 注意：不能硬编码期望房型 —— "最便宜的大床房"是搜索算出来的（种子数据下是 2003 园景大床房）。
+    # 要断言的是"订的房型 == 草案里的房型"。
+    $expectedRt = "$($r1.Body.data.candidates[0].roomTypeId)"
+    Check 'the booking uses the draft room type'    ("$($parts[1])" -eq $expectedRt) "roomTypeId=$($parts[1]) expected=$expectedRt"
+    Check 'the booking uses the draft dates'        ("$($parts[2])" -eq "$ci") "checkIn=$($parts[2])"
+    Check 'the booking starts in PENDING_PAYMENT'   ("$($parts[5])" -eq '10') "status=$($parts[5])"
+}
+
+# ---------------------------------------------------------------------------
+"`n=== 3. ★ 再确认一次：不能下第二单 ==="
+$before3 = [int](BCount)
+$r3 = AgentChat '确认' $sid
+$after3 = [int](BCount)
+"  stage=$(Stage $r3)  订单数 $before3 -> $after3"
+"  reply: $($r3.Body.data.reply)"
+Check 'a second confirm does not create another booking' ($after3 -eq $before3) "before=$before3 after=$after3"
+Check 'the draft is gone after booking' ((Stage $r3) -in @('NO_DRAFT','COLLECTING','CHITCHAT')) "actual=$(Stage $r3)"
+
+# ---------------------------------------------------------------------------
+"`n=== 4. 说「算了」不下单 ==="
+$r4a = AgentChat "帮我订杭州 $ci 到 $co 的双床房，1间" ''
+$sid4 = $r4a.Body.data.sessionId
+"  先查到候选: stage=$(Stage $r4a)"
+$before4 = [int](BCount)
+$r4 = AgentChat '算了，先不订了' $sid4
+$after4 = [int](BCount)
+"  说「算了」-> stage=$(Stage $r4)  订单数 $before4 -> $after4"
+Check 'cancelling the intention creates no booking' ($after4 -eq $before4) "before=$before4 after=$after4"
+
+# ---------------------------------------------------------------------------
+"`n=== 5. 没有草案时确认 -> 不会瞎订 ==="
+$fresh = AgentChat '你好' ''
+$sid5 = $fresh.Body.data.sessionId
+$r5 = AgentChat '确认' $sid5
+"  新会话直接说「确认」-> stage=$(Stage $r5)"
+"  reply: $($r5.Body.data.reply)"
+Check 'confirm without a draft is refused' ((Stage $r5) -eq 'NO_DRAFT') "actual=$(Stage $r5)"
+
+# ---------------------------------------------------------------------------
+"`n=== 6. ★★ 下单内容以草案为准（用户话里提别的房型也没用）==="
+# 手工造一个会话：草案指向 2001 大床房
+$now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+$sid6 = "hitl-draft-$($now.ToString().Substring(7))"
+$draft6 = @{
+    hotelId = 1001; hotelName = '草案酒店'
+    roomTypeId = $RT_BED; roomTypeName = '草案房型'
+    checkIn = $ci; checkOut = $co; roomCount = 1
+    totalAmount = 1000.00; createdAt = $now
+} | ConvertTo-Json -Compress
+$session6 = @{
+    sessionId = $sid6; userId = 9001; intent = 'BOOK'
+    slots = @{ city = '杭州'; checkIn = $ci; checkOut = $co; roomCount = '1' }
+    history = @(); draftJson = $draft6; updatedAt = $now
+} | ConvertTo-Json -Depth 6 -Compress
+# ★ 必须用 RedisSetRaw：redis-cli 直接传参会把 JSON 里的双引号吃掉，
+#   应用解析失败就会当成"会话不存在"（踩过）
+RedisSetRaw (SessionKey $sid6) $session6
+$readBack = RedisGetRaw (SessionKey $sid6)
+"  回读 $($readBack.Length) 字节，开头: $($readBack.Substring(0,[Math]::Min(70,$readBack.Length)))"
+# 断言"双引号还在、还是一份合法 JSON"，而不是逐字节相等 ——
+# 逐字节会被工具的编码/换行习惯影响（这里就踩过），
+# 而真正要保证的是【写进去的是一份引号完好的 JSON】
+# （原来的 bug 就是 redis-cli 把引号吃掉，变成 {a:1} 这种非法格式）。
+Check 'the hand-written session is valid JSON (quotes survived)' `
+    (($readBack.StartsWith('{')) -and ($readBack.EndsWith('}')) -and ($readBack -like '*"draftJson"*')) `
+    "head=$($readBack.Substring(0,[Math]::Min(60,$readBack.Length)))"
+"  已手工写入会话 $sid6，草案指向 roomTypeId=$RT_BED（大床房）"
+
+# ★ 关键点：草案指向 2001（高级大床房），而"重新搜一次"会选中 2003（园景大床房，最便宜）。
+#   所以只要最终订的是 2001，就证明下单内容来自【草案】而不是重新搜索/用户这句话。
+$r6 = AgentChat '确认' $sid6
+$newId6 = $r6.Body.data.bookingId
+"  stage=$(Stage $r6)  bookingId=$newId6"
+if ($newId6) {
+    $rt6 = Sql "SELECT room_type_id FROM booking WHERE booking_id=$newId6"
+    "  DB 里实际订的 room_type_id = $rt6  （必须是 $RT_BED，不是 $RT_TWIN）"
+    Check 'the order follows the DRAFT, not the words' ("$rt6" -eq "$RT_BED") "actual=$rt6 expected=$RT_BED"
+} else {
+    Check 'the order follows the DRAFT, not the words' $false "no bookingId; stage=$(Stage $r6)"
+}
+
+# ---------------------------------------------------------------------------
+"`n=== 7. 草案过期 -> 不敢下单 ==="
+$old = $now - (30 * 60 * 1000)   # 30 分钟前
+$sid7 = "hitl-stale-$($now.ToString().Substring(7))"
+$draft7 = @{
+    hotelId = 1001; hotelName = '过期草案酒店'
+    roomTypeId = $RT_BED; roomTypeName = '过期草案房型'
+    checkIn = $ci; checkOut = $co; roomCount = 1
+    totalAmount = 1000.00; createdAt = $old
+} | ConvertTo-Json -Compress
+$session7 = @{
+    sessionId = $sid7; userId = 9001; intent = 'BOOK'
+    slots = @{ city = '杭州'; checkIn = $ci; checkOut = $co; roomCount = '1' }
+    history = @(); draftJson = $draft7; updatedAt = $old
+} | ConvertTo-Json -Depth 6 -Compress
+RedisSetRaw (SessionKey $sid7) $session7
+"  已写入一个 30 分钟前的草案"
+
+$before7 = [int](BCount)
+$r7 = AgentChat '确认' $sid7
+$after7 = [int](BCount)
+"  stage=$(Stage $r7)  订单数 $before7 -> $after7"
+"  reply: $($r7.Body.data.reply)"
+Check 'a stale draft is refused' ((Stage $r7) -eq 'DRAFT_EXPIRED') "actual=$(Stage $r7)"
+Check 'a stale draft creates no booking' ($after7 -eq $before7) "before=$before7 after=$after7"
+
+RedisCmd @('DEL', (SessionKey $sid6)) | Out-Null
+RedisCmd @('DEL', (SessionKey $sid7)) | Out-Null
+
+# ---------------------------------------------------------------------------
+"`n=== 8. 收尾一致性 ==="
+$mismatch = Sql @"
+SELECT COUNT(*) FROM room_inventory i
+LEFT JOIN (SELECT room_type_id, stay_date, SUM(room_count) n FROM booking_inventory_link WHERE released=0 GROUP BY room_type_id, stay_date) l
+  ON l.room_type_id=i.room_type_id AND l.stay_date=i.stay_date
+WHERE i.sold_rooms <> IFNULL(l.n,0)
+"@
+Check 'no drift between ledger and inventory' ($mismatch -eq '0') "mismatched=$mismatch"
+
+Summarize

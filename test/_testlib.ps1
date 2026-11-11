@@ -108,6 +108,23 @@ function Login([string]$username = 'testuser', [string]$password = '123456') {
 # 临时清掉 token —— 用来验证"未登录被拦住"
 function ClearToken { $script:Token = $null }
 
+# 原样写入一个字符串值（JSON 之类的）
+#
+# ★ 为什么不能直接用 RedisCmd：redis-cli.exe 在 Windows 上会把【参数里的双引号吃掉】，
+#   JSON 会被破坏成 {a:1,b:中文} 这种非法格式 —— 写进去 402 字节，读回来 344 字节，
+#   应用再解析就失败（会被当成"会话不存在"）。踩过。
+#   用 -x 从 stdin 读值，绕开命令行引号解析，字节级一致。
+function RedisSetRaw([string]$key, [string]$value) {
+    $value | & $script:Rcli -p $script:RedisPort -a $script:RedisPwd -x SET $key 2>$null | Out-Null
+}
+
+# 读一个字符串值（多行会拼起来）
+function RedisGetRaw([string]$key) {
+    # ★ 必须 TrimEnd：redis-cli 输出会带一个尾换行，
+    #   不裁掉的话长度可能正好相同、内容却不相等（比较永远为 False）。
+    return ((& $script:Rcli -p $script:RedisPort -a $script:RedisPwd GET $key 2>$null) -join '').TrimEnd()
+}
+
 # ---------- HTTP ----------
 function Api {
     param([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers)

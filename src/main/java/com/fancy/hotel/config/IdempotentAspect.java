@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fancy.hotel.common.BusinessException;
 import com.fancy.hotel.common.Idempotent;
 import com.fancy.hotel.common.RedisKeyConstants;
+import com.fancy.hotel.common.UserContext;
 import com.fancy.hotel.domain.entity.IdempotentRecord;
 import com.fancy.hotel.mapper.IdempotentRecordMapper;
 import jakarta.servlet.ServletRequest;
@@ -202,9 +203,19 @@ public class IdempotentAspect {
      * 没传就用参数指纹 —— 同一份请求体算同一个请求。
      */
     private String fingerprint(ProceedingJoinPoint pjp) throws Exception {
+        // ★ 必须把「当前登录用户」算进指纹。
+        //
+        //   P4.1 之后 userId 不再从入参取（改成从 token 取），如果指纹里没有用户身份，
+        //   两个不同用户提交【完全相同的请求体】就会算出同一个幂等键 ——
+        //   后一个人会被当成"重复提交"，回放前一个人的 bookingId。
+        //   后果：既漏了别人的订单号，又少建了一单。（这是 P4 改身份来源时引入的）
+        //
+        //   没有登录上下文时（内部调用/定时任务）拼空前缀，行为不变。
+        String userPart = currentUserPart();
+
         String clientKey = headerValue(HEADER_NAME);
         if (clientKey != null && !clientKey.isBlank()) {
-            return "h:" + clientKey.trim();
+            return userPart + "h:" + clientKey.trim();
         }
         List<Object> keep = new ArrayList<>();
         for (Object a : pjp.getArgs()) {
@@ -214,7 +225,20 @@ public class IdempotentAspect {
             keep.add(a);
         }
         String json = objectMapper.writeValueAsString(keep.toArray());
-        return "f:" + sha256Hex(json).substring(0, 32);
+        return userPart + "f:" + sha256Hex(json).substring(0, 32);
+    }
+
+    /** 指纹里的用户前缀，例如 {@code u9001_}；没有登录用户时为空串 */
+    private String currentUserPart() {
+        try {
+            UserContext.CurrentUser u = UserContext.get();
+            if (u != null && u.userId() != null) {
+                return "u" + u.userId() + "_";
+            }
+        } catch (Exception ignored) {
+            // 忽略：拿不到身份时按"无身份"处理
+        }
+        return "";
     }
 
     private String headerValue(String name) {

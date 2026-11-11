@@ -41,6 +41,9 @@ public class AgentReplyVO {
     /** 候选（stage = SEARCHED 时才有） */
     private List<Candidate> candidates;
 
+    /** 真正下单成功后才有：订单号（P4.4） */
+    private Long bookingId;
+
     @Data
     @Builder
     public static class Candidate {
