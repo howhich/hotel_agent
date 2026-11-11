@@ -90,23 +90,56 @@ function Summarize {
 #   9001 testuser   主测试账号
 #   9002 otheruser  用来验证越权
 $script:Token = $null
+# 管理员 token：运维接口要求 ADMIN/SUPPORT（P4.5），业务套件不该关心这件事
+$script:AdminToken = $null
 
-function Login([string]$username = 'testuser', [string]$password = '123456') {
+function LoginToken([string]$username, [string]$password) {
     $r = Api POST '/auth/login' (JsonBody @{ username = $username; password = $password })
     if ($r.Http -ne 200 -or -not $r.Body.data) {
         # ★ 以前这里是"失败了就算了"，后果很严重：
         #   ResetTestData 会先清掉 hotel:*（连 token 一起删），如果重新登录失败却没人吭声，
         #   后面几十个断言会集体失败、每条都是空的 actual —— 看起来像"业务代码全坏了"。
-        #   宁可在这里炸，也不要制造 66 个假的失败（实测踩过一次）。
+        #   宁可在这里炸，也不要制造几十个假的失败（实测踩过一次）。
         throw ("登录失败（$username）：HTTP $($r.Http) $($r.Body.message)！" +
                "如果应用刚重启或 Redis 抖动，重跑一次通常就好。")
     }
+    return $r
+}
+
+function Login([string]$username = 'testuser', [string]$password = '123456') {
+    $r = LoginToken $username $password
     $script:Token = $r.Body.data.token
     return $r
 }
 
+# 以管理员身份登录（拿 token 存到 $script:AdminToken，不影响当前用户）
+function LoginAdmin([string]$username = 'admin', [string]$password = '123456') {
+    $r = LoginToken $username $password
+    $script:AdminToken = $r.Body.data.token
+    return $r
+}
+
+# ---------- 运维接口的路径（这些要求管理员）----------
+# 和 WebConfig 里 AdminInterceptor 的 pathPatterns 保持一致。
+# ★ 测试库对这类路径【自动用管理员 token】：
+#   业务套件（下单、缓存、清理）本来就是在验证业务逻辑，不该被权限挡住；
+#   而"普通用户调运维接口要 403"这件事，在 p4_authz_test 里用 -AsUser 专门验。
+$script:OpsPrefixes = @(
+    '/booking/inv/', '/booking/maintenance/', '/booking/delay/',
+    '/booking/hotel/geo/', '/booking/hotel/price/', '/booking/expire-scan'
+)
+function IsOpsPath([string]$path) {
+    foreach ($prefix in $script:OpsPrefixes) {
+        if ($path.StartsWith($prefix)) { return $true }
+    }
+    return $false
+}
+
 # 临时清掉 token —— 用来验证"未登录被拦住"
-function ClearToken { $script:Token = $null }
+function ClearToken {
+    $script:Token = $null
+    $script:AdminToken = $null
+}
 
 # 原样写入一个字符串值（JSON 之类的）
 #
@@ -127,7 +160,7 @@ function RedisGetRaw([string]$key) {
 
 # ---------- HTTP ----------
 function Api {
-    param([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers)
+    param([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers, [switch]$AsUser)
 
     # ★ 守一下 $script:Base 有没有被测试脚本覆盖掉。
     #   PowerShell 变量名【不区分大小写】，脚本里随手写个 $base = "..." 就会
@@ -148,7 +181,12 @@ function Api {
     #   $script:Token 为空时不带（用来测"未登录被拦"的场景）。
     $hdrs = @{}
     if ($Headers) { foreach ($k in $Headers.Keys) { $hdrs[$k] = $Headers[$k] } }
-    if ($script:Token) { $hdrs['Authorization'] = "Bearer $($script:Token)" }
+    # 运维接口自动用管理员 token（-AsUser 可强制用当前用户，用来验证 403）
+    $useToken = $script:Token
+    if ((-not $AsUser) -and (IsOpsPath $Path) -and $script:AdminToken) {
+        $useToken = $script:AdminToken
+    }
+    if ($useToken) { $hdrs['Authorization'] = "Bearer $useToken" }
     if ($hdrs.Count -gt 0) { $p.Headers = $hdrs }
     try {
         $r = Invoke-WebRequest @p -UseBasicParsing
@@ -251,6 +289,7 @@ function ResetTestData {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
             Login | Out-Null
+            LoginAdmin | Out-Null
             return $n
         } catch {
             $lastError = $_

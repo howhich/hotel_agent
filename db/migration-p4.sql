@@ -17,7 +17,9 @@ VALUES
     (9001, 'testuser', 'test@hotel.local',
      '$2a$10$39N7jElLb.YpkbwgWfTG/.sZx9qYOX7qYcZnKBOgbJr.a21i3gQfG', '测试用户', 'USER', 1, 0),
     (9002, 'otheruser', 'other@hotel.local',
-     '$2a$10$5.VpoSXmsgSIHDbtWfT.aeKb3LU3ENappKPxMkJoRVHr5V1dS7YvW', '另一个用户', 'USER', 1, 0)
+     '$2a$10$5.VpoSXmsgSIHDbtWfT.aeKb3LU3ENappKPxMkJoRVHr5V1dS7YvW', '另一个用户', 'USER', 1, 0),
+    (9003, 'admin', 'admin@hotel.local',
+     '$2a$10$39N7jElLb.YpkbwgWfTG/.sZx9qYOX7qYcZnKBOgbJr.a21i3gQfG', '管理员', 'ADMIN', 1, 0)
 ON DUPLICATE KEY UPDATE
     `password`   = VALUES(`password`),
     `nickname`   = VALUES(`nickname`),

@@ -121,6 +121,34 @@ $countB = @((Api GET '/booking/my' '').Body.data).Count
 Check 'A does not see B''s bookings' ($countA -ge 1) "countA=$countA"
 Check 'B only sees its own new booking' ($countB -eq 1) "countB=$countB"
 
+# ---------------------------------------------------------------------------
+"`n=== 7. 运维接口要管理员（P4.5）==="
+# 这些接口能改价格、重建缓存、清数据 —— 登录了远远不够
+Login 'testuser' '123456' | Out-Null
+"  当前身份: testuser(9001, USER)"
+
+# -AsUser 强制使用当前用户 token（否则测试库会自动换成管理员）
+$gateStat   = Api GET '/booking/maintenance/stat' '' -AsUser
+$gateRebuild = Api POST '/booking/inv/rebuild' '{"roomTypeId":2001}' -AsUser
+"  GET  /booking/maintenance/stat（普通用户）-> HTTP $($gateStat.Http)  $($gateStat.Body.message)"
+"  POST /booking/inv/rebuild（普通用户）       -> HTTP $($gateRebuild.Http)"
+Check 'a normal user cannot call ops endpoints (403)' ($gateStat.Http -eq 403) "actual=$($gateStat.Http)"
+Check 'the 403 body says it needs admin' ("$($gateStat.Body.message)" -like '*管理员*') "msg=$($gateStat.Body.message)"
+Check 'rebuild is gated too' ($gateRebuild.Http -eq 403) "actual=$($gateRebuild.Http)"
+
+"  -- 管理员可以 --"
+$adminLogin = LoginAdmin
+"  admin 登录 -> userId=$($adminLogin.Body.data.userId)  role=$($adminLogin.Body.data.role)"
+$admStat = Api GET '/booking/maintenance/stat' ''
+"  GET /booking/maintenance/stat（管理员）-> HTTP $($admStat.Http)"
+Check 'the admin can call ops endpoints' ($admStat.Http -eq 200) "actual=$($admStat.Http)"
+
+"  -- 业务接口不受影响 --"
+$biz = Api GET '/booking/my' '' -AsUser
+"  GET /booking/my（普通用户）-> HTTP $($biz.Http)"
+Check 'business endpoints still work for a normal user' ($biz.Http -eq 200) "actual=$($biz.Http)"
+Check 'the admin login is the seeded ADMIN account' ("$($adminLogin.Body.data.userId)" -eq '9003') "actual=$($adminLogin.Body.data.userId)"
+
 # 收尾：切回主账号
 Login 'testuser' '123456' | Out-Null
 

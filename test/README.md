@@ -51,7 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 
 | `p4_agent_hitl_test.ps1` | 确认下单：草案进会话 / **确认后真的下单且数据正确** / **再确认不会下第二单** / 「算了」不下单 / 无草案时拒绝 / **下单内容以草案为准（用户话里提别的房型也没用）** / 草案过期不敢下单 |
 
-合计 **14 个稳定套件 295 项 + 2 个 Agent 套件 42 项**。
+合计 **14 个稳定套件 301 项 + 2 个 Agent 套件 42 项**。
 
 > ## 两个 Agent 套件是「演示套件」，不作为回归门槛
 >
@@ -60,7 +60,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 > 而不是压并发 / 扛回归。
 >
 > 所以：
-> - **13 个稳定套件（295 项）是回归门槛**，必须全绿再提交
+> - **14 个稳定套件（301 项）是回归门槛**，必须全绿再提交
 > - 两个 Agent 套件**单独跑**验证功能即可；连续跑全量时它们偶发 502（外部 API 抖动/限流），
 >   这是外部依赖的问题，不修
 > - 没配 `DEEPSEEK_API_KEY` 时它们会打印 `[SKIP]` 退出 0没设 `DEEPSEEK_API_KEY` 时它会打印
