@@ -33,4 +33,14 @@ public class BusinessException extends RuntimeException {
     public static BusinessException conflict(String message) {
         return new BusinessException(409, message);
     }
+
+    /** 401 未登录 / 登录已过期 */
+    public static BusinessException unauthorized(String message) {
+        return new BusinessException(401, message);
+    }
+
+    /** 403 登录了，但无权访问这个资源（越权） */
+    public static BusinessException forbidden(String message) {
+        return new BusinessException(403, message);
+    }
 }

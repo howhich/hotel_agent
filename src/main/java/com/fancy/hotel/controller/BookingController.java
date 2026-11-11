@@ -1,6 +1,7 @@
 package com.fancy.hotel.controller;
 
 import com.fancy.hotel.common.Result;
+import com.fancy.hotel.common.UserContext;
 import com.fancy.hotel.domain.dto.AvailabilityQueryDTO;
 import com.fancy.hotel.domain.dto.CancelBookingDTO;
 import com.fancy.hotel.domain.dto.CreateBookingDTO;
@@ -46,6 +47,19 @@ public class BookingController {
     }
 
     /** 订单详情 */
+    /**
+     * 我的订单（P4.1）
+     *
+     * <p>userId 从 token 取，前端不需要传、也传不了别人的。
+     *
+     * <p>注意 {@code /my} 是<b>字面量路径</b>，Spring 会优先于 {@code /{bookingId}} 匹配，
+     * 不会被当成"bookingId = my"去转 Long。
+     */
+    @GetMapping("/my")
+    public Result listMine() {
+        return Result.ok(bookingService.listByUser(UserContext.requireUserId()));
+    }
+
     @GetMapping("/{bookingId}")
     public Result detail(@PathVariable Long bookingId) {
         return Result.ok(bookingService.getBooking(bookingId));

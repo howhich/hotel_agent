@@ -11,13 +11,30 @@
 USE `hotel_booking`;
 
 -- -----------------------------------------------------------------------------
--- 测试用户（P0 无鉴权，password 只是占位）
+-- 测试用户
+--
+--   P4.1 起有真正的登录了，密码是 BCrypt 密文（不是占位符）。
+--   两个账号的密码都是：123456
+--
+--     9001 testuser   USER   主测试账号
+--     9002 otheruser  USER   用来验证越权（A 不能看 B 的订单）
+--
+--   ★ 密码用 ON DUPLICATE KEY UPDATE 覆盖，所以重复执行这份种子会
+--     把密码重置回 123456 —— 本地/测试环境这样最省事。
+--   ★ 这是**演示账号**，真实环境当然不能这么干。
 -- -----------------------------------------------------------------------------
-INSERT IGNORE INTO `sys_user`
+INSERT INTO `sys_user`
     (`user_id`, `username`, `email`, `password`, `nickname`, `role`, `status`, `is_deleted`)
 VALUES
     (9001, 'testuser', 'test@hotel.local',
-     '$2a$10$placeholderplaceholderplaceholderplaceholderplaceholder', '测试用户', 'USER', 1, 0);
+     '$2a$10$39N7jElLb.YpkbwgWfTG/.sZx9qYOX7qYcZnKBOgbJr.a21i3gQfG', '测试用户', 'USER', 1, 0),
+    (9002, 'otheruser', 'other@hotel.local',
+     '$2a$10$5.VpoSXmsgSIHDbtWfT.aeKb3LU3ENappKPxMkJoRVHr5V1dS7YvW', '另一个用户', 'USER', 1, 0)
+ON DUPLICATE KEY UPDATE
+    `password`   = VALUES(`password`),
+    `nickname`   = VALUES(`nickname`),
+    `status`     = VALUES(`status`),
+    `is_deleted` = VALUES(`is_deleted`);
 
 -- -----------------------------------------------------------------------------
 -- 酒店（杭州，坐标都是真实西湖周边的近似值）

@@ -25,6 +25,27 @@ public final class RedisKeyConstants {
     private static final String ABSENT_PREFIX = "hotel:absent";
     private static final String LOCK_PREFIX = "hotel:lock";
     private static final String PRICE_PREFIX = "hotel:price";
+    private static final String TOKEN_PREFIX = "hotel:token";
+
+    /**
+     * 登录 token -> 用户信息（P4.1）
+     *
+     * <pre>
+     *   key   hotel:token:{随机串}
+     *   value userId:username:role
+     *   TTL   会话时长（默认 2 小时，每次请求可续期）
+     * </pre>
+     *
+     * <p>为什么用「随机 token + Redis」而不是 JWT：
+     * <ul>
+     *   <li><b>可以随时踢下线</b> —— 删掉这个 key 立刻失效；JWT 签出去了就收不回来</li>
+     *   <li>能查"谁在线"，也能做单点登录限制</li>
+     *   <li>代价是每次请求多一次 Redis 查询 —— 本项目本来就依赖 Redis，这个代价可接受</li>
+     * </ul>
+     */
+    public static String authTokenKey(String token) {
+        return TOKEN_PREFIX + ":" + token;
+    }
 
     /**
      * 价格缓存 bucket：<b>一个房型一个月</b>一个 hash（和库存同一个分桶方式）

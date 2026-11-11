@@ -45,8 +45,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 | `p3_single_flight_test.ps1` | 单飞回源：**10 个并发只查 1 次库** / 不超卖（200×3 409×7）/ **无 5xx（无死锁）** / 锁不泄漏 / 别人占锁时仍能服务且不误删别人的锁 |
 | `p3_ttl_jitter_test.ps1` | TTL 抖动：同一时刻建的一批 key **TTL 各不相同**（极差几千秒）/ 都落在 [基础值, 基础值+抖动] / 重建会重新随机 / 抖动不影响缓存命中 / 没有永久的键 |
 | `p3_price_cache_test.ps1` | 价格缓存：第二次报价不查库 / **改价后报价立刻变（失效生效）** / 只失效那一天 / 改价真的落库 / 无价格日期 409 且记占位符不再查库 / 收尾还原种子价 |
+| `p4_auth_test.ps1` | 鉴权：登录 / **密码错与用户不存在提示一致（防枚举）** / 无 token 与伪造 token 都 401 / **下单的 userId 来自 token、请求体里的被无视** / 退出后立刻失效 / 两个账号身份独立 |
 
-合计 **252 项断言**。
+合计 **276 项断言**。
+
+## 登录（P4 起所有业务接口都要 token）
+
+种子里有**两个账号，密码都是 `123456`**：
+
+| userId | username | 用途 |
+|---|---|---|
+| 9001 | `testuser` | 主测试账号 |
+| 9002 | `otheruser` | 验证越权（A 不能看 B 的订单） |
+
+**测试脚本不用手动登录** —— `_testlib.ps1` 里：
+
+- `Api` 会自动把 `$script:Token` 放进 `Authorization: Bearer` 头
+- `ResetTestData` 在清完 `hotel:*`（**顺带把 token 也清了**）之后会**自动重新登录**
+- 想测"未登录被拦"就用 `ClearToken`，想换账号就用 `Login 'otheruser' '123456'`
+
+> ⚠️ 如果自己写了不走 `Api` 的请求（比如用 `HttpClient` 做并发测试），**要手动加 token 头** ——
+> `p3_single_flight_test` 就这么踩过一次，10 个并发全部 401。
 
 ## 环境变量（换机器时用，不必改脚本）
 

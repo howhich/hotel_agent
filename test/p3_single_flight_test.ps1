@@ -58,6 +58,9 @@ function PostConcurrent([string]$path, [string]$json, [string[]]$keys) {
         $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, "$($script:Base)$path")
         $req.Content = New-Object System.Net.Http.StringContent($json, [Text.Encoding]::UTF8, 'application/json')
         $req.Headers.Add('Idempotency-Key', $k)
+        # ★ 这里绕过了公共库的 Api，所以 token 要自己加 ——
+        #   否则并发请求全部 401（P4.1 加鉴权后踩过）
+        if ($script:Token) { $req.Headers.Add('Authorization', "Bearer $($script:Token)") }
         $tasks.Add($client.SendAsync($req))
     }
     [System.Threading.Tasks.Task]::WaitAll($tasks.ToArray())

@@ -84,6 +84,24 @@ function Summarize {
     "  PASS = $script:pass    FAIL = $script:fail"
 }
 
+# ---------- 登录（P4.1 起所有业务接口都要 token）----------
+#
+# 种子里有两个账号，密码都是 123456：
+#   9001 testuser   主测试账号
+#   9002 otheruser  用来验证越权
+$script:Token = $null
+
+function Login([string]$username = 'testuser', [string]$password = '123456') {
+    $r = Api POST '/auth/login' (JsonBody @{ username = $username; password = $password })
+    if ($r.Http -eq 200 -and $r.Body.data) {
+        $script:Token = $r.Body.data.token
+    }
+    return $r
+}
+
+# 临时清掉 token —— 用来验证"未登录被拦住"
+function ClearToken { $script:Token = $null }
+
 # ---------- HTTP ----------
 function Api {
     param([string]$Method, [string]$Path, [string]$Json, [hashtable]$Headers)
@@ -102,7 +120,13 @@ function Api {
 
     $p = @{ Method=$Method; Uri=($script:Base+$Path); ContentType='application/json; charset=utf-8'; TimeoutSec=30 }
     if ($Json) { $p.Body = [Text.Encoding]::UTF8.GetBytes($Json) }
-    if ($Headers) { $p.Headers = $Headers }
+
+    # ★ P4.1 起所有接口都要 token：统一在这里加上，测试脚本不用每处都写。
+    #   $script:Token 为空时不带（用来测"未登录被拦"的场景）。
+    $hdrs = @{}
+    if ($Headers) { foreach ($k in $Headers.Keys) { $hdrs[$k] = $Headers[$k] } }
+    if ($script:Token) { $hdrs['Authorization'] = "Bearer $($script:Token)" }
+    if ($hdrs.Count -gt 0) { $p.Headers = $hdrs }
     try {
         $r = Invoke-WebRequest @p -UseBasicParsing
         # 不要用 $r.Content：响应头若没 charset，PS 5.1 会按 Latin-1 解码，中文变乱码。
@@ -195,5 +219,8 @@ function ResetTestData {
             }
         }
     }
+    # ★ 上面清了 hotel:* —— 里面包含 hotel:token:*
+    #   所以 token 一起被删掉了，必须重新登录，否则后面每个请求都会 401
+    Login | Out-Null
     return $n
 }

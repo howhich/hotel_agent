@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fancy.hotel.common.BusinessException;
+import com.fancy.hotel.common.UserContext;
 import com.fancy.hotel.common.Idempotent;
 import com.fancy.hotel.domain.dto.AvailabilityQueryDTO;
 import com.fancy.hotel.domain.dto.CancelBookingDTO;
@@ -280,7 +281,9 @@ public class BookingServiceImpl implements BookingService {
         CancelPolicy policy = CancelPolicy.fromCode(rt.getCancelPolicy());
         Booking booking = Booking.builder()
                 .bookingId(bookingId)
-                .userId(dto.getUserId())
+                // ★ 身份只来自 token（UserContext），不来自请求体。
+                //   dto.getUserId() 已经不再被读取 —— 客户端传什么都不认。
+                .userId(UserContext.requireUserId())
                 .hotelId(dto.getHotelId())
                 .roomTypeId(dto.getRoomTypeId())
                 .checkIn(dto.getCheckIn())
