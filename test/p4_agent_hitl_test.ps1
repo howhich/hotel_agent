@@ -257,7 +257,73 @@ Check 'the follow-up keeps the earlier dates in context' ($out10b -ne $out10) "b
 Check 'checkout moved later (it understood "+1 night")' ($out10b -gt $out10) "before=$out10 after=$out10b"
 
 # ---------------------------------------------------------------------------
-"`n=== 11. 收尾一致性 ==="
+"`n=== 11. ★ 我的订单 + 取消（P2，两步确认）==="
+ResetTestData | Out-Null
+"  重置后 bookings=$(BCount)"
+
+# 直接走接口建一单（不经过 Agent），这样测的是 Agent 的"取消"能力
+$c11 = NewBooking 2001 (D 60) (D 62) 1
+$bid11 = $c11.Body.data
+"  建单 bookingId=$bid11  状态=$(Sql "SELECT booking_status FROM booking WHERE booking_id=$bid11")"
+Check 'the booking was created for the cancel test' ($c11.Http -eq 200) "actual=$($c11.Http)"
+
+$r11a = AgentChat '我的订单' ''
+"  「我的订单」-> stage=$(Stage $r11a)"
+"  reply: $($r11a.Body.data.reply)"
+Check 'listing my bookings works' ((Stage $r11a) -eq 'LISTED') "actual=$(Stage $r11a)"
+Check 'the list contains the right booking id' ("$($r11a.Body.data.reply)" -like "*$bid11*") "bid=$bid11"
+
+# ★ 必须带上 sessionId：草案存在会话里，不带就等于每轮都是新会话
+$sid11 = $r11a.Body.data.sessionId
+$r11b = AgentChat '帮我把它取消了吧' $sid11
+"  「帮我把它取消了吧」-> stage=$(Stage $r11b)"
+"  reply: $($r11b.Body.data.reply)"
+# SELECTED（用户从候选里挑中了）和 CONFIRM_NEEDED（直接解析出唯一目标）
+# 都是"在等确认"，语义等价 —— 关键断言是下面那条：DB 状态没变
+Check 'cancel asks for confirmation first' ((Stage $r11b) -in @('CONFIRM_NEEDED','SELECTED')) "actual=$(Stage $r11b)"
+$st11 = Sql "SELECT booking_status FROM booking WHERE booking_id=$bid11"
+"  ★ 此时 DB 状态 = $st11（必须还是 10 —— 没确认就不能动）"
+Check 'nothing was cancelled before confirmation' ("$st11" -eq '10') "actual=$st11"
+Check 'inventory is still held' ("$(DSold 2001 (D 60))" -eq '1') "sold=$(DSold 2001 (D 60))"
+
+$r11c = AgentChat '确认' $sid11
+"  「确认」-> stage=$(Stage $r11c)"
+"  reply: $($r11c.Body.data.reply)"
+Check 'confirm actually cancels' ((Stage $r11c) -eq 'CANCELLED') "actual=$(Stage $r11c)"
+$st11b = Sql "SELECT booking_status FROM booking WHERE booking_id=$bid11"
+"  DB 状态 = $st11b（90 = 已取消）   库存 = $(DSold 2001 (D 60))"
+Check 'the booking is now CANCELLED (90)' ("$st11b" -eq '90') "actual=$st11b"
+Check 'inventory was released' ("$(DSold 2001 (D 60))" -eq '0') "sold=$(DSold 2001 (D 60))"
+
+# ---------------------------------------------------------------------------
+"`n=== 12. ★ 改期（P2，两步确认）==="
+$ci12 = D 65
+$co12 = D 67
+$ni12 = D 70
+$no12 = D 72
+$c12 = NewBooking 2001 $ci12 $co12 1
+$bid12 = $c12.Body.data
+"  建单 bookingId=$bid12  $ci12 ~ $co12"
+
+$r12a = AgentChat "把订单 $bid12 改期到 $ni12 入住，$no12 离店" ''
+"  「改期」-> stage=$(Stage $r12a)"
+"  reply: $($r12a.Body.data.reply)"
+Check 'reschedule asks for confirmation first' ((Stage $r12a) -eq 'CONFIRM_NEEDED') "actual=$(Stage $r12a)"
+$sid12 = $r12a.Body.data.sessionId
+$in12 = Sql "SELECT check_in FROM booking WHERE booking_id=$bid12"
+"  ★ 此时 DB check_in = $in12（必须还是原值 $ci12）"
+Check 'nothing changed before confirmation' ("$in12" -eq "$ci12") "actual=$in12"
+
+$r12b = AgentChat '确认' $sid12
+"  「确认」-> stage=$(Stage $r12b)"
+"  reply: $($r12b.Body.data.reply)"
+Check 'confirm actually reschedules' ((Stage $r12b) -eq 'RESCHEDULED') "actual=$(Stage $r12b)"
+$row12 = Sql "SELECT CONCAT(check_in,'|',check_out,'|',booking_status) FROM booking WHERE booking_id=$bid12"
+"  DB: check_in|check_out|status = $row12"
+Check 'the booking dates actually changed' ("$(($row12 -split '\|')[0])" -eq "$ni12") "actual=$($row12 -split '\|')[0] expected=$ni12"
+
+# ---------------------------------------------------------------------------
+"`n=== 13. 收尾一致性 ==="
 $mismatch = Sql @"
 SELECT COUNT(*) FROM room_inventory i
 LEFT JOIN (SELECT room_type_id, stay_date, SUM(room_count) n FROM booking_inventory_link WHERE released=0 GROUP BY room_type_id, stay_date) l

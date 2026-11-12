@@ -6,7 +6,12 @@ import com.fancy.hotel.common.BusinessException;
 import com.fancy.hotel.common.UserContext;
 import com.fancy.hotel.domain.agent.AgentDraft;
 import com.fancy.hotel.domain.agent.AgentSession;
+import com.fancy.hotel.domain.dto.CancelBookingDTO;
 import com.fancy.hotel.domain.dto.CreateBookingDTO;
+import com.fancy.hotel.domain.dto.RescheduleBookingDTO;
+import com.fancy.hotel.domain.vo.BookingVO;
+import com.fancy.hotel.domain.vo.CancelResultVO;
+import com.fancy.hotel.domain.vo.RescheduleResultVO;
 import com.fancy.hotel.domain.dto.AgentChatDTO;
 import com.fancy.hotel.domain.vo.AgentReplyVO;
 import com.fancy.hotel.service.BookingService;
@@ -53,6 +58,7 @@ public class AgentService {
     private final LlmClient llmClient;
     private final AgentSessionStore sessionStore;
     private final HotelSearchTool searchTool;
+    private final MyBookingTool myBookingTool;
     private final BookingService bookingService;
     private final ObjectMapper objectMapper;
     /** 草案多久之后就不算数了（分钟） */
@@ -63,6 +69,7 @@ public class AgentService {
     public AgentService(LlmClient llmClient,
                         AgentSessionStore sessionStore,
                         HotelSearchTool searchTool,
+                        MyBookingTool myBookingTool,
                         BookingService bookingService,
                         ObjectMapper objectMapper,
                         @Value("${hotel.agent.draft-ttl-minutes:5}") int draftTtlMinutes,
@@ -70,6 +77,7 @@ public class AgentService {
         this.llmClient = llmClient;
         this.sessionStore = sessionStore;
         this.searchTool = searchTool;
+        this.myBookingTool = myBookingTool;
         this.bookingService = bookingService;
         this.objectMapper = objectMapper;
         this.draftTtlMinutes = Math.max(1, draftTtlMinutes);
@@ -95,6 +103,24 @@ public class AgentService {
         if (router.slots != null && !router.slots.isEmpty()) {
             session.getSlots().putAll(router.slots);
         }
+
+        // ---------- ★ 兜底一：日期被塞错槽位 ----------
+        //   提示词里同时有 checkIn/checkOut 和 newCheckIn/newCheckOut，
+        //   模型偶尔会把预订日期填到 new* 里，导致明明说清了日期却还在追问。
+        //   预订/查询时 new* 一律当作 checkIn/checkOut 用。
+        normalizeDatesByIntent(session);
+
+        // ---------- ★ 兜底二：明显是"确认"的一句话 ----------
+        //   模型看到上文全是"取消/改期"，会把"确认"也判成 CANCEL，于是每次都回
+        //   "要取消 X 吗？"，用户永远按不下去。要不要动钱这件事不能只靠模型。
+        String effectiveIntent = router.intent;
+        if (session.selectedDraft() != null && looksLikeConfirm(session, message)) {
+            effectiveIntent = "CONFIRM";
+            log.debug("「{}」当作 CONFIRM 处理（当前有待确认草案: {}）",
+                    message, session.selectedDraft().getKind());
+        }
+        session.setIntent(effectiveIntent);
+
         appendHistory(session, "user", message);
 
         // ---------- ②' 用户是否从候选里挑了一个 ----------
@@ -107,13 +133,9 @@ public class AgentService {
         if (picked >= 0) {
             session.setSelectedIndex(picked);
         }
-        if (picked >= 0 && !"CONFIRM".equals(router.intent)) {
+        if (picked >= 0 && !"CONFIRM".equals(effectiveIntent)) {
             AgentDraft d = session.getCandidates().get(picked);
-            String pickedAmount = d.getTotalAmount() == null
-                    ? "?" : d.getTotalAmount().stripTrailingZeros().toPlainString();
-            String pickedText = "好的，选的是 [" + (picked + 1) + "]「" + d.getHotelName() + " / "
-                    + d.getRoomTypeName() + "」，" + d.getCheckIn() + " 到 " + d.getCheckOut()
-                    + "，" + d.getRoomCount() + " 间共 ¥" + pickedAmount + "。确认订这个吗？";
+            String pickedText = confirmPrompt(d, picked);
             AgentReplyVO selectedReply = AgentReplyVO.builder()
                     .sessionId(session.getSessionId())
                     .intent(session.getIntent())
@@ -130,14 +152,12 @@ public class AgentService {
 
         // ---------- ③④ 按意图分派 ----------
         AgentReplyVO reply;
-        switch (router.intent) {
+        switch (effectiveIntent) {
             case "BOOK", "QUERY" -> reply = handleSearch(session);
             case "CONFIRM" -> reply = handleConfirm(session);
-            case "CANCEL" -> reply = plain(session, "UNSUPPORTED",
-                    "取消订单我暂时还不会帮你办，可以在「我的订单」里直接取消。"
-                            + "（自助取消接口是现成的，Agent 这一版先只做预订）");
-            case "RESCHEDULE" -> reply = plain(session, "UNSUPPORTED",
-                    "改期我也还不会，可以在订单详情里改。");
+            case "MYBOOKINGS" -> reply = handleMyBookings(session);
+            case "CANCEL" -> reply = handleCancel(session);
+            case "RESCHEDULE" -> reply = handleReschedule(session);
             default -> reply = plain(session, "CHITCHAT",
                     "我是酒店预订助手，可以帮你查房和订房。"
                             + "比如跟我说「帮我订杭州11月20号住两晚，要大床房」。");
@@ -168,6 +188,10 @@ public class AgentService {
                 + "- pick: 只有在用户【明确从上一条回复列出的候选中挑一个】时才填：\n"
                 + "        填那个酒店的完整名字（照抄候选里的写法），或序号 \"1\"/\"2\"/\"3\"；\n"
                 + "        其它情况一律 null\n"
+                + "- intent 还可以是 MYBOOKINGS（\"我的订单\"\"我订了什么\"\"查下我的订单\"）\n"
+                + "- slots.bookingId: 用户提到的订单号（纯数字串）；没有就 null\n"
+                + "- slots.newCheckIn / slots.newCheckOut: 【只有改期(RESCHEDULE)才填】新的入住/离店日期；\n"
+                + "        预订和查询一律填在 checkIn/checkOut 里，不要填这两个\n"
                 + "示例输出：{\"intent\":\"BOOK\",\"slots\":{\"city\":\"杭州\",\"checkIn\":\""
                 + today.plusDays(9).format(DATE) + "\",\"checkOut\":\""
                 + today.plusDays(11).format(DATE)
@@ -367,47 +391,23 @@ public class AgentService {
                             + "要我重新查一遍吗？");
         }
 
-        // ---------- 真正下单：内容来自草案，身份来自登录上下文 ----------
-        Long userId = UserContext.requireUserId();
-        CreateBookingDTO dto = new CreateBookingDTO();
-        dto.setUserId(userId);          // 只用于幂等指纹；createBooking 内部仍然以 UserContext 为准
-        dto.setHotelId(draft.getHotelId());
-        dto.setRoomTypeId(draft.getRoomTypeId());
-        dto.setCheckIn(draft.getCheckIn());
-        dto.setCheckOut(draft.getCheckOut());
-        dto.setRoomCount(draft.getRoomCount());
-        dto.setGuestCount(1);
-
+                // ---------- 三种动作共用同一套安全线：草案 -> 身份 -> 执行 ----------
+        //   身份在 execute* 里从 UserContext 取；内容只来自草案。
+        String kind = draft.getKind() == null ? "BOOK" : draft.getKind();
+        log.info("Agent 确认执行: kind={}, userId={}, bookingId={}, roomTypeId={}",
+                kind, UserContext.requireUserId(), draft.getBookingId(), draft.getRoomTypeId());
         try {
-            Long bookingId = bookingService.createBooking(dto);
-            session.clearDraft();     // 用完即作废
-            session.getSlots().clear();     // 这一单结束了，清空槽位（用户可以接着说下一单）
-            log.info("Agent 确认下单成功: userId={}, bookingId={}, roomTypeId={}",
-                    userId, bookingId, draft.getRoomTypeId());
-
-            String amount = draft.getTotalAmount() == null
-                    ? "?" : draft.getTotalAmount().stripTrailingZeros().toPlainString();
-            return AgentReplyVO.builder()
-                    .sessionId(session.getSessionId())
-                    .intent(session.getIntent())
-                    .stage("BOOKED")
-                    .slots(session.getSlots())
-                    .missing(List.of())
-                    .candidates(List.of())
-                    .bookingId(bookingId)
-                    .reply("订好了！订单号 " + bookingId + "。"
-                            + draft.getHotelName() + " / " + draft.getRoomTypeName() + "，"
-                            + draft.getCheckIn() + " 到 " + draft.getCheckOut() + "，"
-                            + draft.getRoomCount() + " 间，共 ¥" + amount
-                            + "。请在 15 分钟内完成支付，超时会自动释放房间。")
-                    .build();
+            return switch (kind) {
+                case "CANCEL" -> executeCancel(session, draft);
+                case "RESCHEDULE" -> executeReschedule(session, draft);
+                default -> executeBook(session, draft);
+            };
         } catch (BusinessException e) {
-            // 房没了 / 价格日历变了 / 被别人抢了 —— 草案作废，让用户重新查
+            // 房没了 / 已被取消 / 不是你的 —— 草案作废，让用户重新来
             session.clearDraft();
-            log.warn("Agent 确认下单失败: userId={}, roomTypeId={}, err={}",
-                    userId, draft.getRoomTypeId(), e.getMessage());
-            return plain(session, "BOOK_FAILED",
-                    "没订上：" + e.getMessage() + "。要我重新查一下还有哪些可订的吗？");
+            log.warn("Agent 确认执行失败: kind={}, err={}", kind, e.getMessage());
+            return plain(session, "ACTION_FAILED",
+                    "没办成：" + e.getMessage() + "。要我重新查一下吗？");
         }
     }
 
@@ -486,6 +486,320 @@ public class AgentService {
 
     private static int toIndex(int oneBased, int size) {
         return (oneBased >= 1 && oneBased <= size) ? oneBased - 1 : -1;
+    }
+    // =========================================================================
+    // 三个执行动作（P2）：预订 / 取消 / 改期
+    //
+    // ★ 三个方法形状完全一致：读草案 -> 从 UserContext 取身份 -> 调既有服务 -> 清草案。
+    //   取消和改期【不在这里重算退款/差价】—— 那是业务服务的事，
+    //   Agent 再算一遍迟早会和主链路不一致。
+    // =========================================================================
+
+    private AgentReplyVO executeBook(AgentSession session, AgentDraft draft) {
+        Long userId = UserContext.requireUserId();
+        CreateBookingDTO dto = new CreateBookingDTO();
+        dto.setUserId(userId);          // 只用于幂等指纹；createBooking 内部仍然以 UserContext 为准
+        dto.setHotelId(draft.getHotelId());
+        dto.setRoomTypeId(draft.getRoomTypeId());
+        dto.setCheckIn(draft.getCheckIn());
+        dto.setCheckOut(draft.getCheckOut());
+        dto.setRoomCount(draft.getRoomCount());
+        dto.setGuestCount(1);
+
+        Long bookingId = bookingService.createBooking(dto);
+        session.clearDraft();
+        session.getSlots().clear();     // 这一单结束了，用户可以接着说下一单
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("BOOKED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .bookingId(bookingId)
+                .reply("订好了！订单号 " + bookingId + "。"
+                        + nz(draft.getHotelName()) + " / " + nz(draft.getRoomTypeName()) + "，"
+                        + draft.getCheckIn() + " 到 " + draft.getCheckOut() + "，"
+                        + draft.getRoomCount() + " 间，共 ¥" + money(draft.getTotalAmount())
+                        + "。请在 15 分钟内完成支付，超时会自动释放房间。")
+                .build();
+    }
+
+    private AgentReplyVO executeCancel(AgentSession session, AgentDraft draft) {
+        CancelBookingDTO dto = new CancelBookingDTO();
+        dto.setReason("用户通过预订助手取消");
+        dto.setCancelRole(1);           // 1 = 用户主动取消，走退订政策
+        CancelResultVO r = bookingService.cancelBooking(draft.getBookingId(), dto);
+        session.clearDraft();
+        session.getSlots().clear();
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("CANCELLED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .bookingId(r.getBookingId())
+                .reply("已取消订单 " + r.getBookingId() + "。"
+                        + "已付 ¥" + money(r.getPaidAmount()) + "，"
+                        + "退款 ¥" + money(r.getRefundAmount())
+                        + (r.getRefundRatioText() == null ? "" : "（" + r.getRefundRatioText() + "）")
+                        + "，退订政策：" + nz(r.getPolicyName()) + "。")
+                .build();
+    }
+
+    private AgentReplyVO executeReschedule(AgentSession session, AgentDraft draft) {
+        RescheduleBookingDTO dto = new RescheduleBookingDTO();
+        dto.setNewCheckIn(draft.getNewCheckIn());
+        dto.setNewCheckOut(draft.getNewCheckOut());
+        RescheduleResultVO r = bookingService.rescheduleBooking(draft.getBookingId(), dto);
+        session.clearDraft();
+        session.getSlots().clear();
+        String diffSign = (r.getPriceDiff() != null && r.getPriceDiff().signum() >= 0) ? "+" : "";
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("RESCHEDULED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .bookingId(r.getBookingId())
+                .reply("改好了！订单 " + r.getBookingId() + " 从 "
+                        + r.getOldCheckIn() + "~" + r.getOldCheckOut()
+                        + " 改到 " + r.getNewCheckIn() + "~" + r.getNewCheckOut() + "，"
+                        + r.getOldNights() + " 晚 -> " + r.getNewNights() + " 晚，"
+                        + "金额 ¥" + money(r.getOldTotalAmount()) + " -> ¥" + money(r.getNewTotalAmount())
+                        + "（差价 " + diffSign + money(r.getPriceDiff()) + "）。")
+                .build();
+    }
+
+    // =========================================================================
+    // 我的订单 / 取消 / 改期（P2）
+    // =========================================================================
+
+    /**
+     * 列出当前用户能操作的订单，并把它们存成候选
+     *
+     * <p>存成候选是为了复用 P1 的"挑选"机制：用户说"第二个"就能直接选中要处理的那一单，
+     * 不用再让他去复制订单号。
+     */
+    private AgentReplyVO handleMyBookings(AgentSession session) {
+        List<BookingVO> list = myBookingTool.activeBookings(UserContext.requireUserId());
+        if (list.isEmpty()) {
+            session.clearDraft();
+            return plain(session, "NO_RESULT", "你当前没有待支付或已确认的订单。");
+        }
+        List<AgentDraft> drafts = new ArrayList<>();
+        for (BookingVO v : list) {
+            drafts.add(toBookingDraft(v));
+        }
+        session.setCandidates(drafts);
+        session.setSelectedIndex(0);
+
+        StringBuilder sb = new StringBuilder("你有 " + list.size() + " 个可操作的订单：\n");
+        for (int i = 0; i < list.size(); i++) {
+            BookingVO v = list.get(i);
+            sb.append("[").append(i + 1).append("] ")
+                    .append(nz(v.getHotelName())).append(" / ").append(nz(v.getRoomTypeName()))
+                    .append("　").append(v.getCheckIn()).append(" 到 ").append(v.getCheckOut())
+                    .append("　").append(nz(v.getStatusDesc()))
+                    .append("　¥").append(money(v.getTotalAmount()))
+                    .append("　订单号 ").append(v.getBookingId()).append('\n');
+        }
+        sb.append("要取消哪一单？说「1」「2」或酒店名。");
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("LISTED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .reply(sb.toString())
+                .build();
+    }
+
+    private AgentReplyVO handleCancel(AgentSession session) {
+        BookingVO target = resolveBooking(session);
+        if (target == null) {
+            return promptWhichBooking(session);
+        }
+        session.setCandidates(new ArrayList<>(List.of(toBookingDraft(target))));
+        session.setSelectedIndex(0);
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("CONFIRM_NEEDED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .reply("要取消「" + nz(target.getHotelName()) + " / " + nz(target.getRoomTypeName())
+                        + "」（" + target.getCheckIn() + " 到 " + target.getCheckOut()
+                        + "，订单号 " + target.getBookingId() + "）吗？\n"
+                        + "退款按退订政策计算，取消后我会告诉你具体金额。说「确认」我就办。")
+                .build();
+    }
+
+    private AgentReplyVO handleReschedule(AgentSession session) {
+        BookingVO target = resolveBooking(session);
+        if (target == null) {
+            return promptWhichBooking(session);
+        }
+        Map<String, String> slots = session.getSlots();
+        String newIn = slots.get("newCheckIn");
+        String newOut = slots.get("newCheckOut");
+        if (isBlank(newIn) || isBlank(newOut)) {
+            return collecting(session, List.of("newCheckIn", "newCheckOut"),
+                    "要改到哪几天？说一下新的入住和离店日期（比如「12月1号住两晚」）。");
+        }
+        LocalDate ni;
+        LocalDate no;
+        try {
+            ni = LocalDate.parse(newIn.trim(), DATE);
+            no = LocalDate.parse(newOut.trim(), DATE);
+        } catch (Exception e) {
+            return collecting(session, List.of("newCheckIn", "newCheckOut"),
+                    "新日期我没理解对，麻烦再说一次（比如「12月1号住两晚」）。");
+        }
+        if (ni.isBefore(LocalDate.now()) || !no.isAfter(ni)) {
+            return collecting(session, List.of("newCheckIn", "newCheckOut"),
+                    "新日期不合法（不能是过去，离店必须晚于入住），麻烦再说一次。");
+        }
+
+        AgentDraft draft = toBookingDraft(target);
+        draft.setKind("RESCHEDULE");
+        draft.setNewCheckIn(ni);
+        draft.setNewCheckOut(no);
+        session.setCandidates(new ArrayList<>(List.of(draft)));
+        session.setSelectedIndex(0);
+
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("CONFIRM_NEEDED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .reply("把订单 " + target.getBookingId() + "（" + nz(target.getHotelName()) + " / "
+                        + nz(target.getRoomTypeName()) + "）从 "
+                        + target.getCheckIn() + "~" + target.getCheckOut()
+                        + " 改到 " + ni + "~" + no + " 吗？\n"
+                        + "金额会按新日期重算，改完告诉你差价。说「确认」我就办。")
+                .build();
+    }
+
+    /**
+     * 从订单号槽位里找出目标订单；没说、或对不上就返回 null
+     *
+     * <p>只有一单时默认选它 —— 但仍然会要一次确认，不会直接执行。
+     */
+    private BookingVO resolveBooking(AgentSession session) {
+        List<BookingVO> active = myBookingTool.activeBookings(UserContext.requireUserId());
+        if (active.isEmpty()) {
+            return null;
+        }
+        String bid = session.getSlots().get("bookingId");
+        if (!isBlank(bid)) {
+            for (BookingVO v : active) {
+                if (String.valueOf(v.getBookingId()).equals(bid.trim())) {
+                    return v;
+                }
+            }
+            return null;
+        }
+        return active.size() == 1 ? active.get(0) : null;
+    }
+
+    /** 没说清是哪一单时，把可操作的订单列出来让他挑 */
+    private AgentReplyVO promptWhichBooking(AgentSession session) {
+        AgentReplyVO listed = handleMyBookings(session);
+        listed.setReply(listed.getReply()
+                + "\n（也可以直接把订单号告诉我，那样更快。）");
+        return listed;
+    }
+
+    /** 把一笔订单包成"取消"草案（后续可改成改期） */
+    private AgentDraft toBookingDraft(BookingVO v) {
+        return AgentDraft.builder()
+                .kind("CANCEL")
+                .bookingId(v.getBookingId())
+                .hotelId(v.getHotelId())
+                .hotelName(v.getHotelName())
+                .roomTypeId(v.getRoomTypeId())
+                .roomTypeName(v.getRoomTypeName())
+                .checkIn(v.getCheckIn())
+                .checkOut(v.getCheckOut())
+                .roomCount(v.getRoomCount())
+                .totalAmount(v.getTotalAmount())
+                .createdAt(System.currentTimeMillis())
+                .build();
+    }
+
+    /** 确认话术按动作类型变：订 / 取消 / 改期 */
+    private String confirmPrompt(AgentDraft d, int index) {
+        String kind = d.getKind() == null ? "BOOK" : d.getKind();
+        String what = "[" + (index + 1) + "]「" + nz(d.getHotelName()) + " / "
+                + nz(d.getRoomTypeName()) + "」";
+        return switch (kind) {
+            case "CANCEL" -> "好的，选的是 " + what + "（订单号 " + d.getBookingId()
+                    + "）。确认取消这一单吗？";
+            case "RESCHEDULE" -> "好的，选的是 " + what + "（订单号 " + d.getBookingId()
+                    + "）。确认按新日期改期吗？";
+            default -> "好的，选的是 " + what + "，" + d.getCheckIn() + " 到 " + d.getCheckOut()
+                    + "，" + d.getRoomCount() + " 间共 ¥" + money(d.getTotalAmount())
+                    + "。确认订这个吗？";
+        };
+    }
+
+    /** 预订/查询时把误填到 newCheckIn/newCheckOut 的日期挪回 checkIn/checkOut */
+    private void normalizeDatesByIntent(AgentSession session) {
+        Map<String, String> slots = session.getSlots();
+        String intent = session.getIntent();
+        boolean bookish = "BOOK".equals(intent) || "QUERY".equals(intent);
+        if (bookish && isBlank(slots.get("checkIn")) && !isBlank(slots.get("newCheckIn"))) {
+            slots.put("checkIn", slots.get("newCheckIn"));
+            if (!isBlank(slots.get("newCheckOut"))) {
+                slots.put("checkOut", slots.get("newCheckOut"));
+            }
+            slots.remove("newCheckIn");
+            slots.remove("newCheckOut");
+            log.debug("日期被模型放到了 new* 槽位，已挪回 checkIn/checkOut");
+        }
+    }
+
+    /**
+     * 这句话是不是在"确认"
+     *
+     * <p>只在【已经有待确认草案】时才用，且只看很短的句子（长句子交给模型）。
+     * 这是对模型的一道兜底：要不要动钱，不能完全指望它的意图判断。
+     */
+    private boolean looksLikeConfirm(AgentSession session, String msg) {
+        if (msg == null) {
+            return false;
+        }
+        String m = msg.replaceAll("[\\s，。！!？?、~,.]", "");
+        if (m.isEmpty() || m.length() > 6) {
+            return false;
+        }
+        AgentDraft pending = session.selectedDraft();
+        String kind = pending == null || pending.getKind() == null ? "BOOK" : pending.getKind();
+        // 上下文是"要取消吗"，用户回"取消吧"当然算确认
+        if ("CANCEL".equals(kind) && m.contains("取消")) {
+            return true;
+        }
+        if ("RESCHEDULE".equals(kind) && m.contains("改")) {
+            return true;
+        }
+        return m.contains("确认") || m.contains("确定") || m.contains("就它") || m.contains("就这个")
+                || m.equals("是的") || m.equals("对") || m.equals("好的") || m.equals("可以")
+                || m.equalsIgnoreCase("ok") || m.equalsIgnoreCase("yes");
+    }
+
+    private static String nz(String s) {
+        return s == null ? "" : s;
+    }
+
+    private static String money(java.math.BigDecimal v) {
+        return v == null ? "?" : v.stripTrailingZeros().toPlainString();
     }
     private AgentReplyVO collecting(AgentSession session, List<String> missing, String text) {
         return AgentReplyVO.builder()
