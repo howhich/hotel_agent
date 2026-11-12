@@ -54,9 +54,9 @@ $sid = $r1.Body.data.sessionId
 Check 'search reaches SEARCHED' ((Stage $r1) -eq 'SEARCHED') "actual=$(Stage $r1)"
 
 $sessionJson = RedisCmd @('GET', (SessionKey $sid))
-$hasDraft = $sessionJson -like '*draftJson*'
+$hasDraft = $sessionJson -like '*"candidates"*'
 "  会话里有草案字段: $hasDraft   会话长度 $($sessionJson.Length)"
-Check 'the draft is persisted in the session' $hasDraft ''
+Check 'the candidates are persisted in the session' $hasDraft ''
 
 # ---------------------------------------------------------------------------
 "`n=== 2. 确认 -> 真的下单 ==="
@@ -123,12 +123,15 @@ $draft6 = @{
     roomTypeId = $RT_BED; roomTypeName = '草案房型'
     checkIn = $ci; checkOut = $co; roomCount = 1
     totalAmount = 1000.00; createdAt = $now
-} | ConvertTo-Json -Compress
+}
 $session6 = @{
     sessionId = $sid6; userId = 9001; intent = 'BOOK'
     slots = @{ city = '杭州'; checkIn = $ci; checkOut = $co; roomCount = '1' }
-    history = @(); draftJson = $draft6; updatedAt = $now
-} | ConvertTo-Json -Depth 6 -Compress
+    history = @()
+    candidates = @($draft6)
+    selectedIndex = 0
+    updatedAt = $now
+} | ConvertTo-Json -Depth 8 -Compress
 # ★ 必须用 RedisSetRaw：redis-cli 直接传参会把 JSON 里的双引号吃掉，
 #   应用解析失败就会当成"会话不存在"（踩过）
 RedisSetRaw (SessionKey $sid6) $session6
@@ -139,7 +142,7 @@ $readBack = RedisGetRaw (SessionKey $sid6)
 # 而真正要保证的是【写进去的是一份引号完好的 JSON】
 # （原来的 bug 就是 redis-cli 把引号吃掉，变成 {a:1} 这种非法格式）。
 Check 'the hand-written session is valid JSON (quotes survived)' `
-    (($readBack.StartsWith('{')) -and ($readBack.EndsWith('}')) -and ($readBack -like '*"draftJson"*')) `
+    (($readBack.StartsWith('{')) -and ($readBack.EndsWith('}')) -and ($readBack -like '*"candidates"*')) `
     "head=$($readBack.Substring(0,[Math]::Min(60,$readBack.Length)))"
 "  已手工写入会话 $sid6，草案指向 roomTypeId=$RT_BED（大床房）"
 
@@ -165,12 +168,15 @@ $draft7 = @{
     roomTypeId = $RT_BED; roomTypeName = '过期草案房型'
     checkIn = $ci; checkOut = $co; roomCount = 1
     totalAmount = 1000.00; createdAt = $old
-} | ConvertTo-Json -Compress
+}
 $session7 = @{
     sessionId = $sid7; userId = 9001; intent = 'BOOK'
     slots = @{ city = '杭州'; checkIn = $ci; checkOut = $co; roomCount = '1' }
-    history = @(); draftJson = $draft7; updatedAt = $old
-} | ConvertTo-Json -Depth 6 -Compress
+    history = @()
+    candidates = @($draft7)
+    selectedIndex = 0
+    updatedAt = $old
+} | ConvertTo-Json -Depth 8 -Compress
 RedisSetRaw (SessionKey $sid7) $session7
 "  已写入一个 30 分钟前的草案"
 
@@ -186,7 +192,72 @@ RedisCmd @('DEL', (SessionKey $sid6)) | Out-Null
 RedisCmd @('DEL', (SessionKey $sid7)) | Out-Null
 
 # ---------------------------------------------------------------------------
-"`n=== 8. 收尾一致性 ==="
+"`n=== 8. ★ 候选可以挑（P1）==="
+$r8a = AgentChat "帮我订杭州 $ci 到 $co 的房，要大床房，1间" ''
+$sid8 = $r8a.Body.data.sessionId
+"  stage=$(Stage $r8a)  session=$sid8"
+"  reply: $($r8a.Body.data.reply)"
+
+$sess8 = (RedisGetRaw (SessionKey $sid8)) | ConvertFrom-Json
+$cand8 = @($sess8.candidates)
+"  会话里存了 $($cand8.Count) 个候选，选中 index=$($sess8.selectedIndex)"
+Check 'all candidates are kept in the session (not just the cheapest)' ($cand8.Count -ge 2) "count=$($cand8.Count)"
+Check 'the default selection is the first one' ("$($sess8.selectedIndex)" -eq '0') "actual=$($sess8.selectedIndex)"
+
+$r8b = AgentChat '第二个吧' $sid8
+"  说「第二个吧」-> stage=$(Stage $r8b)"
+"  reply: $($r8b.Body.data.reply)"
+Check 'picking the 2nd candidate reaches SELECTED' ((Stage $r8b) -eq 'SELECTED') "actual=$(Stage $r8b)"
+
+$sess8b = (RedisGetRaw (SessionKey $sid8)) | ConvertFrom-Json
+"  selectedIndex 变成 $($sess8b.selectedIndex)"
+Check 'the selection actually moved to index 1' ("$($sess8b.selectedIndex)" -eq '1') "actual=$($sess8b.selectedIndex)"
+
+$want8 = "$($cand8[1].roomTypeId)"
+"  第 2 个候选的房型 = $want8（第 1 个是 $($cand8[0].roomTypeId)）"
+$r8c = AgentChat '确认' $sid8
+$newId8 = $r8c.Body.data.bookingId
+"  确认 -> stage=$(Stage $r8c)  bookingId=$newId8"
+if ($newId8) {
+    $rt8 = Sql "SELECT room_type_id FROM booking WHERE booking_id=$newId8"
+    "  DB 里订的房型 = $rt8 （必须是 $want8，不是第 1 个）"
+    Check 'it books the SELECTED candidate, not the cheapest' ("$rt8" -eq $want8) "actual=$rt8 expected=$want8"
+} else {
+    Check 'it books the SELECTED candidate, not the cheapest' $false "no bookingId"
+}
+
+# ---------------------------------------------------------------------------
+"`n=== 9. ★ 不能清别人的会话（P0）==="
+Login 'otheruser' '123456' | Out-Null
+$r9 = Api POST '/agent/reset' (JsonBody @{ sessionId = $sid8 })
+"  otheruser 清 9001 的会话 -> HTTP $($r9.Http)  $($r9.Body.message)"
+Check 'another user cannot clear someone else''s session' ($r9.Http -eq 403) "actual=$($r9.Http)"
+Check 'the message says it is about ownership' ("$($r9.Body.message)" -like '*别人的会话*') "msg=$($r9.Body.message)"
+$still8 = RedisGetRaw (SessionKey $sid8)
+Check 'the session is still there' ($still8.Length -gt 10) "len=$($still8.Length)"
+
+Login 'testuser' '123456' | Out-Null
+$r9b = Api POST '/agent/reset' (JsonBody @{ sessionId = $sid8 })
+"  testuser 清自己的会话 -> HTTP $($r9b.Http)"
+Check 'the owner can clear its own session' ($r9b.Http -eq 200) "actual=$($r9b.Http)"
+
+# ---------------------------------------------------------------------------
+"`n=== 10. ★ 历史对话真的发给模型了（P0）==="
+# 先查一次两晚，然后只说"再住一晚" —— 只有模型看得到上文才算得对
+$r10a = AgentChat "帮我订杭州 $ci 住两晚，1间大床房" ''
+$sid10 = $r10a.Body.data.sessionId
+$out10 = "$($r10a.Body.data.slots.checkOut)"
+"  第一次: checkIn=$($r10a.Body.data.slots.checkIn) checkOut=$out10 stage=$(Stage $r10a)"
+
+$r10b = AgentChat '再住一晚呢' $sid10
+$out10b = "$($r10b.Body.data.slots.checkOut)"
+"  说「再住一晚呢」-> checkOut=$out10b  stage=$(Stage $r10b)"
+"  reply: $($r10b.Body.data.reply)"
+Check 'the follow-up keeps the earlier dates in context' ($out10b -ne $out10) "before=$out10 after=$out10b"
+Check 'checkout moved later (it understood "+1 night")' ($out10b -gt $out10) "before=$out10 after=$out10b"
+
+# ---------------------------------------------------------------------------
+"`n=== 11. 收尾一致性 ==="
 $mismatch = Sql @"
 SELECT COUNT(*) FROM room_inventory i
 LEFT JOIN (SELECT room_type_id, stay_date, SUM(room_count) n FROM booking_inventory_link WHERE released=0 GROUP BY room_type_id, stay_date) l

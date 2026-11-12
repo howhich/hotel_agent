@@ -51,7 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p1_idempotency_test.ps1
 
 | `p4_agent_hitl_test.ps1` | 确认下单：草案进会话 / **确认后真的下单且数据正确** / **再确认不会下第二单** / 「算了」不下单 / 无草案时拒绝 / **下单内容以草案为准（用户话里提别的房型也没用）** / 草案过期不敢下单 |
 
-合计 **14 个稳定套件 301 项 + 2 个 Agent 套件 42 项**。
+合计 **14 个稳定套件 301 项 + 2 个 Agent 套件 53 项**。
 
 > ## 两个 Agent 套件是「演示套件」，不作为回归门槛
 >

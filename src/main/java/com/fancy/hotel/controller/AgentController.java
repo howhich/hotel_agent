@@ -39,12 +39,21 @@ public class AgentController {
         return Result.ok(agentService.chat(UserContext.requireUserId(), dto));
     }
 
-    /** 重置会话（用户想换个话题重来） */
+    /**
+     * 重置会话（用户想换个话题重来）
+     *
+     * <p>★ 要校验会话归属：{@code sessionId} 虽然是 16 位十六进制、猜不到，
+     * 但"猜不到"不是"可以不校验"。订单号也猜不到，我们照样校验。
+     * 别人不能帮你清会话，正如别人不能帮你取消订单。
+     */
     @PostMapping("/reset")
     public Result reset(@RequestBody(required = false) AgentChatDTO dto) {
         Map<String, Object> out = new LinkedHashMap<>();
         if (dto != null) {
-            sessionStore.clear(dto.getSessionId());
+            boolean cleared = sessionStore.clearIfOwned(dto.getSessionId(), UserContext.requireUserId());
+            if (!cleared) {
+                throw com.fancy.hotel.common.BusinessException.forbidden("无权清空别人的会话");
+            }
             out.put("cleared", dto.getSessionId());
         } else {
             out.put("cleared", null);

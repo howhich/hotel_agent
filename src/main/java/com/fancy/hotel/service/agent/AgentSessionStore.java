@@ -77,14 +77,37 @@ public class AgentSessionStore {
         }
     }
 
-    public void clear(String sessionId) {
+    /**
+     * 清掉会话，<b>但必须先确认它是这个人的</b>（P0 修正）
+     *
+     * <p>原来的 {@code clear(sessionId)} 谁调都能删。
+     * {@code loadOrCreate} 里明明校验了"会话属于同一 userId"，
+     * 删除这个出口却漏了 —— 同一个规则只写在了入口，没写在出口。
+     * 订单号也猜不到，但我们照样校验归属，这里同理。
+     *
+     * @return true = 已清掉（或本来就不存在）；false = 不是你的，拒绝
+     */
+    public boolean clearIfOwned(String sessionId, Long userId) {
         if (sessionId == null || sessionId.isBlank()) {
-            return;
+            return true;
         }
         try {
+            String json = redis.opsForValue().get(RedisKeyConstants.agentSessionKey(sessionId));
+            if (json == null) {
+                return true;          // 本来就没有，等价于清掉了（重置应当幂等）
+            }
+            AgentSession s = objectMapper.readValue(json, AgentSession.class);
+            if (s.getUserId() != null && !s.getUserId().equals(userId)) {
+                log.warn("越权清会话: 会话 {} 属于用户 {}，当前用户 {}",
+                        sessionId, s.getUserId(), userId);
+                return false;
+            }
             redis.delete(RedisKeyConstants.agentSessionKey(sessionId));
+            return true;
         } catch (Exception e) {
-            log.warn("清会话失败: {}", e.getMessage());
+            // Redis 抖动 / JSON 坏了：删不掉不算严重错误，记一笔就好
+            log.warn("清会话失败（忽略）: sessionId={}, err={}", sessionId, e.getMessage());
+            return true;
         }
     }
 }

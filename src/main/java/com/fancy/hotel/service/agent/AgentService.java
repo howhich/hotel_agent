@@ -57,19 +57,23 @@ public class AgentService {
     private final ObjectMapper objectMapper;
     /** 草案多久之后就不算数了（分钟） */
     private final int draftTtlMinutes;
+    /** 拼提示时最多带几轮历史（一轮 = 用户+助手两条） */
+    private final int maxHistoryTurns;
 
     public AgentService(LlmClient llmClient,
                         AgentSessionStore sessionStore,
                         HotelSearchTool searchTool,
                         BookingService bookingService,
                         ObjectMapper objectMapper,
-                        @Value("${hotel.agent.draft-ttl-minutes:5}") int draftTtlMinutes) {
+                        @Value("${hotel.agent.draft-ttl-minutes:5}") int draftTtlMinutes,
+                        @Value("${hotel.agent.max-history-turns:10}") int maxHistoryTurns) {
         this.llmClient = llmClient;
         this.sessionStore = sessionStore;
         this.searchTool = searchTool;
         this.bookingService = bookingService;
         this.objectMapper = objectMapper;
         this.draftTtlMinutes = Math.max(1, draftTtlMinutes);
+        this.maxHistoryTurns = Math.max(1, maxHistoryTurns);
     }
 
     // =========================================================================
@@ -92,6 +96,37 @@ public class AgentService {
             session.getSlots().putAll(router.slots);
         }
         appendHistory(session, "user", message);
+
+        // ---------- ②' 用户是否从候选里挑了一个 ----------
+        //   "要第二个""就国宾馆那家" —— 不重新查库，只把选中项挪到 selectedIndex
+        int picked = resolvePick(router.pick, session.getCandidates());
+        // ★ 先落选中项，但【只有不打算下单时才停在这里】。
+        //   否则会出现死循环：用户选完 [2] 说"确认"，模型又把 pick 填成 2
+        //   （因为上文一直在提候选），于是每次都回"确认吗？"，永远下不了单。
+        //   优先级：明确说"确认" > 挑一个候选。
+        if (picked >= 0) {
+            session.setSelectedIndex(picked);
+        }
+        if (picked >= 0 && !"CONFIRM".equals(router.intent)) {
+            AgentDraft d = session.getCandidates().get(picked);
+            String pickedAmount = d.getTotalAmount() == null
+                    ? "?" : d.getTotalAmount().stripTrailingZeros().toPlainString();
+            String pickedText = "好的，选的是 [" + (picked + 1) + "]「" + d.getHotelName() + " / "
+                    + d.getRoomTypeName() + "」，" + d.getCheckIn() + " 到 " + d.getCheckOut()
+                    + "，" + d.getRoomCount() + " 间共 ¥" + pickedAmount + "。确认订这个吗？";
+            AgentReplyVO selectedReply = AgentReplyVO.builder()
+                    .sessionId(session.getSessionId())
+                    .intent(session.getIntent())
+                    .stage("SELECTED")
+                    .slots(session.getSlots())
+                    .missing(List.of())
+                    .candidates(List.of())
+                    .reply(pickedText)
+                    .build();
+            appendHistory(session, "assistant", pickedText);
+            sessionStore.save(session);
+            return selectedReply;
+        }
 
         // ---------- ③④ 按意图分派 ----------
         AgentReplyVO reply;
@@ -129,6 +164,10 @@ public class AgentService {
                 + "- slots.checkOut: \"YYYY-MM-DD\"；\"住两晚\" => 离店 = 入住 + 2 天；没有就 null\n"
                 + "- slots.roomCount: 整数；没有就 null\n"
                 + "- slots.bedType: \"大床\" 或 \"双床\"；没有就 null\n"
+                + "- 打招呼、问\"你能干什么\"、闲聊 -> intent 一律填 CHITCHAT（不要填 QUERY）\n"
+                + "- pick: 只有在用户【明确从上一条回复列出的候选中挑一个】时才填：\n"
+                + "        填那个酒店的完整名字（照抄候选里的写法），或序号 \"1\"/\"2\"/\"3\"；\n"
+                + "        其它情况一律 null\n"
                 + "示例输出：{\"intent\":\"BOOK\",\"slots\":{\"city\":\"杭州\",\"checkIn\":\""
                 + today.plusDays(9).format(DATE) + "\",\"checkOut\":\""
                 + today.plusDays(11).format(DATE)
@@ -136,7 +175,7 @@ public class AgentService {
     }
 
     private RouterResult route(AgentSession session, String message) {
-        String payload = "已知信息：" + toJson(session.getSlots()) + "\n用户这句话：" + message;
+        String payload = buildRoutePayload(session, message);
         String json;
         try {
             json = llmClient.completeJson(systemPrompt(), payload);
@@ -152,6 +191,10 @@ public class AgentService {
         try {
             JsonNode root = objectMapper.readTree(json);
             String intent = root.path("intent").asText("CHITCHAT").toUpperCase().trim();
+            String pick = root.path("pick").asText("").trim();
+            if ("null".equalsIgnoreCase(pick)) {
+                pick = "";
+            }
 
             Map<String, String> slots = new LinkedHashMap<>();
             JsonNode s = root.path("slots");
@@ -168,15 +211,15 @@ public class AgentService {
                 });
             }
             log.debug("解析结果: intent={}, slots={}", intent, slots);
-            return new RouterResult(intent, slots);
+            return new RouterResult(intent, slots, pick);
         } catch (Exception e) {
             // 模型偶尔会返回坏 JSON。不猜，直接当闲聊回一句引导的话。
             log.warn("模型 JSON 解析失败，降级为 CHITCHAT: {} / {}", e.getMessage(), json);
-            return new RouterResult("CHITCHAT", Map.of());
+            return new RouterResult("CHITCHAT", Map.of(), "");
         }
     }
 
-    private record RouterResult(String intent, Map<String, String> slots) {
+    private record RouterResult(String intent, Map<String, String> slots, String pick) {
     }
 
     // =========================================================================
@@ -219,7 +262,7 @@ public class AgentService {
                 slots.get("city"), checkIn, checkOut, roomCount, bedType);
 
         if (found.isEmpty()) {
-            session.setDraftJson(null);
+            session.clearDraft();
             return AgentReplyVO.builder()
                     .sessionId(session.getSessionId())
                     .intent(session.getIntent())
@@ -237,39 +280,44 @@ public class AgentService {
         List<AgentReplyVO.Candidate> top = found.size() > 3 ? found.subList(0, 3) : found;
         AgentReplyVO.Candidate best = top.get(0);
 
-        // ★ 存成完整的草案：确认时用它下单，而不是重新解析用户那句话
-        session.setDraftJson(toJson(AgentDraft.builder()
-                .hotelId(best.getHotelId())
-                .hotelName(best.getHotelName())
-                .roomTypeId(best.getRoomTypeId())
-                .roomTypeName(best.getRoomTypeName())
-                .checkIn(checkIn)
-                .checkOut(checkOut)
-                .roomCount(roomCount)
-                .totalAmount(best.getTotalAmount())
-                .createdAt(System.currentTimeMillis())
-                .build()));
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("找到 ").append(found.size()).append(" 个可订的房型。");
-        sb.append("最便宜的是「").append(best.getHotelName()).append(" / ")
-                .append(best.getRoomTypeName()).append("」，")
-                .append(best.getNights()).append(" 晚 ")
-                .append(best.getRoomCount()).append(" 间共 ¥")
-                .append(best.getTotalAmount().stripTrailingZeros().toPlainString()).append("。");
-        if (top.size() > 1) {
-            sb.append("还有 ");
-            for (int i = 1; i < top.size(); i++) {
-                AgentReplyVO.Candidate c = top.get(i);
-                sb.append("「").append(c.getHotelName()).append("/").append(c.getRoomTypeName())
-                        .append(" ¥").append(c.getTotalAmount().stripTrailingZeros().toPlainString())
-                        .append("」");
-                if (i < top.size() - 1) {
-                    sb.append("、");
-                }
-            }
-            sb.append("。");
+        // ★ 整份候选都存进会话（不再只留最便宜那一个）：
+        //   回复里已经把 2~3 个选项列给用户了，用户说"要第二个/那家 X"必须有处可选。
+        //   同时这也是"下单内容的唯一来源" —— 确认时用它，不用用户那句话、不用模型。
+        List<AgentDraft> drafts = new ArrayList<>();
+        long draftedAt = System.currentTimeMillis();
+        for (AgentReplyVO.Candidate c : top) {
+            drafts.add(AgentDraft.builder()
+                    .hotelId(c.getHotelId())
+                    .hotelName(c.getHotelName())
+                    .roomTypeId(c.getRoomTypeId())
+                    .roomTypeName(c.getRoomTypeName())
+                    .checkIn(checkIn)
+                    .checkOut(checkOut)
+                    .roomCount(roomCount)
+                    .totalAmount(c.getTotalAmount())
+                    .createdAt(draftedAt)
+                    .build());
         }
+        session.setCandidates(drafts);
+        session.setSelectedIndex(0);
+
+        // ★ 带编号：这样用户说"第二个"才有明确所指（原来只是一段自然语言列举）
+        StringBuilder sb = new StringBuilder();
+        sb.append("找到 ").append(found.size()).append(" 个可订的房型：\n");
+        for (int i = 0; i < top.size(); i++) {
+            AgentReplyVO.Candidate c = top.get(i);
+            sb.append("[").append(i + 1).append("] ")
+                    .append(c.getHotelName()).append(" / ").append(c.getRoomTypeName())
+                    .append("　").append(c.getNights()).append(" 晚 ")
+                    .append(c.getRoomCount()).append(" 间　¥")
+                    .append(c.getTotalAmount() == null ? "?"
+                            : c.getTotalAmount().stripTrailingZeros().toPlainString());
+            if (i == 0) {
+                sb.append("　（最便宜）");
+            }
+            sb.append("\n");
+        }
+        sb.append("说「1」「2」或直接说酒店名可以换一家；说「确认」就订选中的这个。");
 
         return AgentReplyVO.builder()
                 .sessionId(session.getSessionId())
@@ -303,25 +351,16 @@ public class AgentService {
      * 正确做法是让 Agent 说人话："这个房型刚被订走了，我再帮你查？"
      */
     private AgentReplyVO handleConfirm(AgentSession session) {
-        String draftJson = session.getDraftJson();
-        if (isBlank(draftJson)) {
+        AgentDraft draft = session.selectedDraft();
+        if (draft == null) {
             return plain(session, "NO_DRAFT",
                     "我这边没有待确认的方案。先说想订哪里的房，我查给你看。");
-        }
-
-        AgentDraft draft;
-        try {
-            draft = objectMapper.readValue(draftJson, AgentDraft.class);
-        } catch (Exception e) {
-            log.warn("草案解析失败: {}", e.getMessage());
-            session.setDraftJson(null);
-            return plain(session, "NO_DRAFT", "刚才那个方案我这边读不出来了，麻烦重新说一下想订什么。");
         }
 
         // ---------- 过期检查：草案是"某一刻的房态 + 价格" ----------
         long ageMs = System.currentTimeMillis() - draft.getCreatedAt();
         if (ageMs > draftTtlMinutes * 60_000L) {
-            session.setDraftJson(null);
+            session.clearDraft();
             long mins = Math.max(1, ageMs / 60_000L);
             return plain(session, "DRAFT_EXPIRED",
                     "那个方案是 " + mins + " 分钟前查的，价格和房态可能变了，我不敢直接下单。"
@@ -341,7 +380,7 @@ public class AgentService {
 
         try {
             Long bookingId = bookingService.createBooking(dto);
-            session.setDraftJson(null);     // 用完即作废
+            session.clearDraft();     // 用完即作废
             session.getSlots().clear();     // 这一单结束了，清空槽位（用户可以接着说下一单）
             log.info("Agent 确认下单成功: userId={}, bookingId={}, roomTypeId={}",
                     userId, bookingId, draft.getRoomTypeId());
@@ -364,7 +403,7 @@ public class AgentService {
                     .build();
         } catch (BusinessException e) {
             // 房没了 / 价格日历变了 / 被别人抢了 —— 草案作废，让用户重新查
-            session.setDraftJson(null);
+            session.clearDraft();
             log.warn("Agent 确认下单失败: userId={}, roomTypeId={}, err={}",
                     userId, draft.getRoomTypeId(), e.getMessage());
             return plain(session, "BOOK_FAILED",
@@ -372,6 +411,82 @@ public class AgentService {
         }
     }
 
+    // =========================================================================
+    // 拼提示 / 解析用户挑选
+    // =========================================================================
+
+    /**
+     * 拼出"给模型看的那段话"：最近几轮对话 + 已知槽位 + 当前这句
+     *
+     * <p>★ history 原来是<b>只写不读</b>：会话里存了 20 条对话，但发给模型的
+     * 只有槽位和当前这句。后果是"再住一晚呢""往后推一天"这类依赖上文的说法
+     * 解析不出来 —— 模型看不到刚才聊到哪了。
+     *
+     * <p>只带最近 {@code maxHistoryTurns} 轮（一轮 = 用户 + 助手）：全量发既费钱，
+     * 越长的上下文也越容易跑偏。
+     */
+    private String buildRoutePayload(AgentSession session, String message) {
+        StringBuilder sb = new StringBuilder();
+        List<Map<String, String>> h = session.getHistory();
+        if (h != null && !h.isEmpty()) {
+            int from = Math.max(0, h.size() - maxHistoryTurns * 2);
+            sb.append("最近的对话（旧→新）：\n");
+            for (int i = from; i < h.size(); i++) {
+                Map<String, String> m = h.get(i);
+                if (m == null) {
+                    continue;
+                }
+                String role = "assistant".equals(m.get("role")) ? "助手" : "用户";
+                sb.append(role).append("：").append(m.get("content")).append('\n');
+            }
+            sb.append('\n');
+        }
+        sb.append("已知信息：").append(toJson(session.getSlots())).append('\n');
+        sb.append("用户这句话：").append(message);
+        return sb.toString();
+    }
+
+    /**
+     * 把模型给的 pick 解析成候选下标
+     *
+     * <p>支持三种写法：序号（"2"）、中文序号（"第二个"）、酒店/房型名（"国宾馆"）。
+     * 解析不出来就返回 -1 —— 当作"用户没挑"，继续走正常分派，绝不硬猜。
+     */
+    private int resolvePick(String pick, List<AgentDraft> candidates) {
+        if (isBlank(pick) || candidates == null || candidates.isEmpty()) {
+            return -1;
+        }
+        String p = pick.trim();
+
+        // 纯数字："2"
+        if (p.matches("\\d+")) {
+            return toIndex(Integer.parseInt(p), candidates.size());
+        }
+        // 中文序号："第二个" / "第二家" / "第 2 个"
+        String cn = p.replaceAll("[第个家条项\\s]", "");
+        Map<String, Integer> cnNum = Map.of("一", 1, "二", 2, "两", 2, "三", 3);
+        if (cnNum.containsKey(cn)) {
+            return toIndex(cnNum.get(cn), candidates.size());
+        }
+        if (cn.matches("\\d+")) {
+            return toIndex(Integer.parseInt(cn), candidates.size());
+        }
+        // 酒店名 / 房型名：双向包含，容错"杭州西湖国宾馆" vs "国宾馆"
+        for (int i = 0; i < candidates.size(); i++) {
+            AgentDraft d = candidates.get(i);
+            String hotel = d.getHotelName() == null ? "" : d.getHotelName();
+            String room = d.getRoomTypeName() == null ? "" : d.getRoomTypeName();
+            if ((!hotel.isEmpty() && (p.contains(hotel) || hotel.contains(p)))
+                    || (!room.isEmpty() && (p.contains(room) || room.contains(p)))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int toIndex(int oneBased, int size) {
+        return (oneBased >= 1 && oneBased <= size) ? oneBased - 1 : -1;
+    }
     private AgentReplyVO collecting(AgentSession session, List<String> missing, String text) {
         return AgentReplyVO.builder()
                 .sessionId(session.getSessionId())
