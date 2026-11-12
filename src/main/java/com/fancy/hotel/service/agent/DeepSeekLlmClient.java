@@ -110,6 +110,66 @@ public class DeepSeekLlmClient implements LlmClient {
         return content;
     }
 
+    @Override
+    public AssistantTurn chatWithTools(String systemPrompt,
+                                       List<Map<String, Object>> messages,
+                                       List<Map<String, Object>> tools) {
+        if (!isAvailable()) {
+            throw new BusinessException(503,
+                    "Agent 未启用：缺少 hotel.agent.api-key（请设置环境变量 DEEPSEEK_API_KEY）");
+        }
+        List<Object> all = new ArrayList<>();
+        Map<String, Object> sysMsg = new LinkedHashMap<>();
+        sysMsg.put("role", "system");
+        sysMsg.put("content", systemPrompt);
+        all.add(sysMsg);
+        all.addAll(messages);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", model);
+        body.put("messages", all);
+        body.put("tools", tools);
+        body.put("tool_choice", "auto");
+        body.put("temperature", 0);
+
+        String raw;
+        long start = System.currentTimeMillis();
+        try {
+            raw = rest.post()
+                    .uri("/chat/completions")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(String.class);
+        } catch (Exception e) {
+            log.error("调用大模型失败(带工具): model={}, err={}", model, e.getMessage());
+            throw new BusinessException(502, "大模型调用失败：" + e.getMessage());
+        }
+        long cost = System.currentTimeMillis() - start;
+
+        try {
+            JsonNode root = objectMapper.readTree(raw);
+            JsonNode msg = root.path("choices").path(0).path("message");
+            String content = msg.path("content").asText("");
+            List<ToolCall> calls = new ArrayList<>();
+            JsonNode arr = msg.path("tool_calls");
+            if (arr.isArray()) {
+                for (JsonNode c : arr) {
+                    calls.add(new ToolCall(
+                            c.path("id").asText(),
+                            c.path("function").path("name").asText(),
+                            c.path("function").path("arguments").asText("{}")));
+                }
+            }
+            log.info("大模型返回(带工具): 耗时={}ms, 文字长度={}, tool_calls={}",
+                    cost, content.length(), calls.size());
+            return new AssistantTurn(content, calls);
+        } catch (Exception e) {
+            log.error("解析大模型响应失败: {}", brief(raw));
+            throw new BusinessException(502, "大模型返回格式无法解析");
+        }
+    }
+
     /**
      * 从 OpenAI 格式的响应里取出 content
      *

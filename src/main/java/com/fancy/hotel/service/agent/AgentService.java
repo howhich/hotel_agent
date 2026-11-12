@@ -794,6 +794,231 @@ public class AgentService {
                 || m.equalsIgnoreCase("ok") || m.equalsIgnoreCase("yes");
     }
 
+    // =========================================================================
+    // P5.2：function calling 路径（与确定性路由并存，用于 A/B 对比）
+    //
+    // 和上面那条路线的区别：
+    //   确定性路由：模型输出 {意图, 槽位} 的 JSON，代码 switch 到 handler
+    //   function calling：把工具定义成 JSON Schema 交给模型，它自己选工具 + 填参数
+    //
+    // ★ 两者【共用同一批 handler】，所以返回结构完全一致，可以直接对比指标。
+    // ★ 但有三样仍然不交给模型：明显确认词的识别、日期二次校验、以及"确认后才动钱"。
+    //   模型只负责"选哪个工具、填什么参数"，措辞和落库还是代码决定。
+    // =========================================================================
+
+    /** 工具调用最多几轮（防止模型来回绕） */
+    private static final int MAX_TOOL_ROUNDS = 3;
+
+    public AgentReplyVO chatWithTools(Long userId, AgentChatDTO dto) {
+        String message = dto.getMessage() == null ? "" : dto.getMessage().trim();
+        if (message.isEmpty()) {
+            throw BusinessException.badRequest("message 不能为空");
+        }
+        AgentSession session = sessionStore.loadOrCreate(dto.getSessionId(), userId);
+
+        // 把最近几轮也带上（和确定性路由保持一致）
+        List<Map<String, Object>> convo = new ArrayList<>();
+        List<Map<String, String>> hist = session.getHistory();
+        if (hist != null && !hist.isEmpty()) {
+            int from = Math.max(0, hist.size() - maxHistoryTurns * 2);
+            for (int i = from; i < hist.size(); i++) {
+                Map<String, String> m = hist.get(i);
+                if (m == null) {
+                    continue;
+                }
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("role", "assistant".equals(m.get("role")) ? "assistant" : "user");
+                one.put("content", m.get("content") == null ? "" : m.get("content"));
+                convo.add(one);
+            }
+        }
+        Map<String, Object> userMsg = new LinkedHashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", message);
+        convo.add(userMsg);
+
+        AgentReplyVO last = null;
+        int rounds = 0;
+        for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
+            LlmClient.AssistantTurn turn =
+                    llmClient.chatWithTools(toolsSystemPrompt(session), convo, toolSchemas());
+            if (!turn.hasToolCalls()) {
+                break;
+            }
+            rounds++;
+
+            // 把模型这一轮（含它要调的工具）回填进对话
+            Map<String, Object> assistantMsg = new LinkedHashMap<>();
+            assistantMsg.put("role", "assistant");
+            assistantMsg.put("content", turn.content() == null ? "" : turn.content());
+            List<Map<String, Object>> calls = new ArrayList<>();
+            for (LlmClient.ToolCall c : turn.toolCalls()) {
+                Map<String, Object> fn = new LinkedHashMap<>();
+                fn.put("name", c.name());
+                fn.put("arguments", c.argumentsJson());
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("id", c.id());
+                one.put("type", "function");
+                one.put("function", fn);
+                calls.add(one);
+            }
+            assistantMsg.put("tool_calls", calls);
+            convo.add(assistantMsg);
+
+            for (LlmClient.ToolCall call : turn.toolCalls()) {
+                AgentReplyVO r = applyToolCall(session, call);
+                Map<String, Object> toolMsg = new LinkedHashMap<>();
+                toolMsg.put("role", "tool");
+                toolMsg.put("tool_call_id", call.id());
+                toolMsg.put("content", r == null ? "{\"ok\":false}" : toolPayload(r));
+                convo.add(toolMsg);
+                if (r != null) {
+                    last = r;
+                }
+            }
+            if (last != null) {
+                break;          // 这一轮已经拿到可用结果，交给下面的收尾
+            }
+        }
+
+        if (last == null) {
+            // ★ 模型没选任何工具（缺参数、闲聊、"确认"等）—— 退化为确定性路由。
+            //   这样"缺什么问什么"和多轮槽位仍然可用，也保证两种模式在评测里可比。
+            log.debug("tools 模式本轮未调用工具，退化为确定性路由");
+            return chat(userId, dto);
+        }
+
+        session.setIntent(last.getIntent());
+        appendHistory(session, "user", message);
+        appendHistory(session, "assistant", last.getReply());
+        sessionStore.save(session);
+        log.info("tools 模式: intent={}, stage={}, 工具轮数={}",
+                last.getIntent(), last.getStage(), rounds);
+        return last;
+    }
+
+    /** 执行一次工具调用；把参数写进槽位后复用已有的 handler */
+    private AgentReplyVO applyToolCall(AgentSession session, LlmClient.ToolCall call) {
+        JsonNode args;
+        try {
+            args = objectMapper.readTree(call.argumentsJson() == null ? "{}" : call.argumentsJson());
+        } catch (Exception e) {
+            log.warn("工具参数不是合法 JSON: {}", call.argumentsJson());
+            return null;
+        }
+        switch (call.name()) {
+            case "query_availability", "propose_booking" -> {
+                session.getSlots().clear();
+                putSlot(session, "city", text(args, "city"));
+                putSlot(session, "checkIn", text(args, "checkIn"));
+                putSlot(session, "checkOut", text(args, "checkOut"));
+                putSlot(session, "roomCount", text(args, "roomCount"));
+                putSlot(session, "bedType", text(args, "bedType"));
+                session.setIntent("propose_booking".equals(call.name()) ? "BOOK" : "QUERY");
+                return handleSearch(session);
+            }
+            case "list_my_bookings" -> {
+                session.setIntent("MYBOOKINGS");
+                return handleMyBookings(session);
+            }
+            default -> {
+                log.warn("未知工具: {}", call.name());
+                return null;
+            }
+        }
+    }
+
+    private static String text(JsonNode args, String field) {
+        JsonNode v = args.path(field);
+        if (v.isMissingNode() || v.isNull()) {
+            return null;
+        }
+        String s = v.asText("").trim();
+        return s.isEmpty() || "null".equalsIgnoreCase(s) ? null : s;
+    }
+
+    private static void putSlot(AgentSession session, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            session.getSlots().put(key, value);
+        }
+    }
+
+    /** 回给模型的工具结果（只给必要的摘要，别把整段文案塞回去） */
+    private String toolPayload(AgentReplyVO r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", true);
+        m.put("stage", r.getStage());
+        if (r.getCandidates() != null && !r.getCandidates().isEmpty()) {
+            List<Map<String, Object>> list = new ArrayList<>();
+            for (AgentReplyVO.Candidate c : r.getCandidates()) {
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("hotel", c.getHotelName());
+                one.put("roomType", c.getRoomTypeName());
+                one.put("totalAmount", c.getTotalAmount());
+                one.put("nights", c.getNights());
+                list.add(one);
+            }
+            m.put("candidates", list);
+        }
+        return toJson(m);
+    }
+
+    private String toolsSystemPrompt(AgentSession session) {
+        return "你是酒店预订助手。今天是 " + LocalDate.now().format(DATE) + "。\n"
+                + "你只能通过【调用工具】来满足用户的请求，不要自己编造酒店、价格或订单。\n"
+                + "规则：\n"
+                + "1. 用户想查房或想订房：调 query_availability / propose_booking，日期请换算成 yyyy-MM-dd；\n"
+                + "   「住两晚」=> 离店 = 入住 + 2 天。\n"
+                + "2. 用户要看自己的订单：调 list_my_bookings。\n"
+                + "3. 参数不全（比如没说城市或日期）时【不要调用工具】，直接用一句话追问缺什么。\n"
+                + "4. 用户只是打招呼或问你能做什么：不要调用工具，简短回答即可。\n"
+                + "当前已收集的信息：" + toJson(session.getSlots());
+    }
+
+    // ---------- 工具定义（OpenAI 风格）----------
+
+    private static List<Map<String, Object>> toolSchemas() {
+        Map<String, Object> stayProps = new LinkedHashMap<>();
+        stayProps.put("city", prop("string", "城市名，如 杭州"));
+        stayProps.put("checkIn", prop("string", "入住日期 yyyy-MM-dd"));
+        stayProps.put("checkOut", prop("string", "离店日期 yyyy-MM-dd"));
+        stayProps.put("roomCount", prop("integer", "房间数，默认 1"));
+        stayProps.put("bedType", prop("string", "床型：大床 / 双床；不限就不填"));
+        List<String> stayRequired = List.of("city", "checkIn", "checkOut");
+
+        return List.of(
+                tool("query_availability", "查询某城市某日期区间有没有可订的房（只查，不下单）",
+                        stayProps, stayRequired),
+                tool("propose_booking", "用户想订房时生成候选方案（仍需用户确认后才会真正下单）",
+                        stayProps, stayRequired),
+                tool("list_my_bookings", "列出当前用户待支付或已确认的订单", Map.of(), List.of())
+        );
+    }
+
+    private static Map<String, Object> tool(String name, String desc,
+                                            Map<String, Object> properties, List<String> required) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("type", "object");
+        params.put("properties", properties);
+        params.put("required", required);
+
+        Map<String, Object> fn = new LinkedHashMap<>();
+        fn.put("name", name);
+        fn.put("description", desc);
+        fn.put("parameters", params);
+
+        Map<String, Object> t = new LinkedHashMap<>();
+        t.put("type", "function");
+        t.put("function", fn);
+        return t;
+    }
+
+    private static Map<String, Object> prop(String type, String desc) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", type);
+        m.put("description", desc);
+        return m;
+    }
     private static String nz(String s) {
         return s == null ? "" : s;
     }

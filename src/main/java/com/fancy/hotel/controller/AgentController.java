@@ -36,7 +36,13 @@ public class AgentController {
 
     @PostMapping("/chat")
     public Result chat(@Valid @RequestBody AgentChatDTO dto) {
-        return Result.ok(agentService.chat(UserContext.requireUserId(), dto));
+        Long userId = UserContext.requireUserId();
+        // mode=tools 时走 function calling；其余走确定性路由。
+        // 两种模式共用同一批 handler，返回结构一致，可以直接对比评测指标。
+        if ("tools".equalsIgnoreCase(dto.getMode())) {
+            return Result.ok(agentService.chatWithTools(userId, dto));
+        }
+        return Result.ok(agentService.chat(userId, dto));
     }
 
     /**

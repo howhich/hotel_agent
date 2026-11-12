@@ -18,13 +18,16 @@
 #    所以这份用例集不会因为时间推移而失效。
 # =============================================================================
 param(
-    [double]$MinE2E = 0
+    [double]$MinE2E = 0,
+    # router = 确定性路由（默认）；tools = function calling。用于 A/B 对比
+    [string]$Mode = 'router'
 )
 
 . "$PSScriptRoot\_testlib.ps1"
 
 $casesPath = Join-Path $PSScriptRoot 'eval-cases.json'
-$reportPath = Join-Path $PSScriptRoot 'eval-report.md'
+$reportName = if ($Mode -eq 'router') { 'eval-report.md' } else { "eval-report-$Mode.md" }
+$reportPath = Join-Path $PSScriptRoot $reportName
 
 # ---------- 工具函数 ----------
 
@@ -60,7 +63,7 @@ function Pct([int]$a, [int]$b) {
 
 # ---------- 准备 ----------
 
-"=== Agent 评测 ==="
+"=== Agent 评测（mode = $Mode）==="
 "  今天 = $((Get-Date).ToString('yyyy-MM-dd HH:mm'))"
 
 ResetTestData | Out-Null
@@ -108,7 +111,9 @@ foreach ($c in $cases) {
     }
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $r = Api POST '/agent/chat' (JsonBody @{ message = $msg })
+    $chatBody = @{ message = $msg }
+    if ($Mode -ne 'router') { $chatBody['mode'] = $Mode }
+    $r = Api POST '/agent/chat' (JsonBody $chatBody)
     $sw.Stop()
     $latencies.Add($sw.Elapsed.TotalSeconds)
 
@@ -202,7 +207,7 @@ $e2eRate = if ($cases.Count -eq 0) { 0 } else { 1.0 * $e2eOk / $cases.Count }
 # ---------- 写报告 ----------
 
 $sb = New-Object System.Text.StringBuilder
-[void]$sb.AppendLine('# Agent 评测报告')
+[void]$sb.AppendLine('# Agent 评测报告（mode = ）')
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine('> 由 `test/p4_agent_eval.ps1` 自动生成，每次运行覆盖。')
 [void]$sb.AppendLine('> 每个用例用一个**全新会话**，所以测的是模型的理解能力，不是上一轮的残留。')
