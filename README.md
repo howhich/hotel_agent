@@ -1,5 +1,4 @@
-<<<<<<< HEAD
-﻿# hotel-booking
+# hotel-booking
 
 一个**酒店/民宿预订**后端，重点解决两件真实项目里最容易出错的事：
 
@@ -255,4 +254,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p0_flow_test.ps1
 - **Mongo / Elasticsearch 容器已就绪但未使用**：预留给后续的工单与检索
 =======
 # hotel_agent
->>>>>>> b50cafcdc00c991e5f9a12b706780a0ebfc271b5
