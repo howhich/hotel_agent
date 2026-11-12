@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ﻿# hotel-booking
 
 一个**酒店/民宿预订**后端，重点解决两件真实项目里最容易出错的事：
@@ -252,3 +253,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p0_flow_test.ps1
 - **开发环境经 SSH 隧道访问远端 Redis**：十几路并发时单条命令可能排队几秒，
   所以 `application.yaml` 里 Redis 超时放宽到了 10 秒（生产同机房可以调回 3 秒）
 - **Mongo / Elasticsearch 容器已就绪但未使用**：预留给后续的工单与检索
+=======
+# hotel_agent
+>>>>>>> b50cafcdc00c991e5f9a12b706780a0ebfc271b5
