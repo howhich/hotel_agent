@@ -1,0 +1,275 @@
+[
+  {
+    "id": "book-basic",
+    "msg": "帮我订杭州 {checkIn} 入住 {checkOut} 离店，要大床房，1间",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "book-two-rooms",
+    "msg": "订杭州 {checkIn} 到 {checkOut} 的房间，要2间",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "roomCount": "2" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "book-twin-one-night",
+    "msg": "杭州 {checkIn} 住一晚，要双床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+10", "bedType": "双床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "book-named-hotel",
+    "msg": "我要订杭州西湖国宾馆 {checkIn} 到 {checkOut} 的大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "book-three-nights",
+    "msg": "{checkIn} 去杭州住三晚，要一间大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+12" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "book-polite",
+    "msg": "麻烦帮我订一下杭州 {checkIn} 的房，住两晚，一间就好",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "query-has-room",
+    "msg": "杭州 {checkIn} 到 {checkOut} 有房吗",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "query-price-only",
+    "msg": "杭州 {checkIn} 的大床房多少钱一晚",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@+9" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "query-available-tonight",
+    "msg": "今晚杭州还有房吗",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@today" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "rel-tomorrow",
+    "msg": "明天杭州有房吗",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@+1" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "rel-day-after-tomorrow",
+    "msg": "后天杭州有房间吗",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@+2" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "rel-next-week",
+    "msg": "下周一想订杭州的房，住一晚，大床",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "miss-everything",
+    "msg": "我想订房",
+    "intent": "BOOK",
+    "slots": {},
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "miss-dates",
+    "msg": "杭州订房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "miss-city",
+    "msg": "{checkIn} 订个房，住一晚",
+    "intent": "BOOK",
+    "slots": { "checkIn": "@+9" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "intent-my-bookings",
+    "msg": "我的订单",
+    "intent": "MYBOOKINGS",
+    "slots": {},
+    "stage": null
+  },
+  {
+    "id": "intent-my-bookings-long",
+    "msg": "帮我看一下我订了哪些房",
+    "intent": "MYBOOKINGS",
+    "slots": {},
+    "stage": null
+  },
+  {
+    "id": "intent-cancel-with-id",
+    "msg": "帮我取消订单 2120716633126903809",
+    "intent": "CANCEL",
+    "slots": { "bookingId": "2120716633126903809" },
+    "stage": null
+  },
+  {
+    "id": "intent-cancel-vague",
+    "msg": "把订单取消了吧",
+    "intent": "CANCEL",
+    "slots": {},
+    "stage": null
+  },
+  {
+    "id": "intent-reschedule",
+    "msg": "把订单 2120716633126903809 改到 {newCheckIn} 入住 {newCheckOut} 离店",
+    "intent": "RESCHEDULE",
+    "slots": { "bookingId": "2120716633126903809", "newCheckIn": "@+9", "newCheckOut": "@+11" },
+    "stage": null
+  },
+  {
+    "id": "intent-reschedule-vague",
+    "msg": "我想改个日期",
+    "intent": "RESCHEDULE",
+    "slots": {},
+    "stage": null
+  },
+  {
+    "id": "intent-chitchat-hello",
+    "msg": "你好",
+    "intent": "CHITCHAT",
+    "slots": {},
+    "stage": "CHITCHAT"
+  },
+  {
+    "id": "intent-chitchat-capability",
+    "msg": "你能干什么",
+    "intent": "CHITCHAT",
+    "slots": {},
+    "stage": "CHITCHAT"
+  },
+  {
+    "id": "intent-chitchat-thanks",
+    "msg": "好的谢谢",
+    "intent": "CHITCHAT",
+    "slots": {},
+    "stage": "CHITCHAT"
+  },
+  {
+    "id": "edge-past-date",
+    "msg": "帮我订杭州 2020-01-01 入住，住两晚",
+    "intent": "BOOK",
+    "slots": { "city": "杭州" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "edge-out-of-calendar",
+    "msg": "订杭州 {checkIn} 到 {checkOut} 的房间",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+400", "checkOut": "@+402" },
+    "stage": "NO_RESULT"
+  },
+  {
+    "id": "edge-city-not-covered",
+    "msg": "上海 {checkIn} 到 {checkOut} 有房吗",
+    "intent": "QUERY",
+    "slots": { "city": "上海", "checkIn": "@+9", "checkOut": "@+11" },
+    "stage": "NO_RESULT"
+  },
+  {
+    "id": "slot-bed-and-rooms",
+    "msg": "杭州 {checkIn} 到 {checkOut}，要两间大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "roomCount": "2", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "slot-spoken-numbers",
+    "msg": "{checkIn} 杭州住两晚，来一间双床的",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "roomCount": "1", "bedType": "双床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "slot-checkout-explicit",
+    "msg": "杭州 {checkIn} 入住，{checkOut} 退房，要大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  }
+  ,
+  {
+    "id": "hard-day-after-tomorrow-cn",
+    "msg": "大后天杭州有房吗",
+    "intent": "QUERY",
+    "slots": { "city": "杭州", "checkIn": "@+3" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "hard-next-saturday",
+    "msg": "这周六杭州住一晚，要大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@sat", "checkOut": "@sat+1", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "hard-typo-and-english",
+    "msg": "帮我 ding 一个杭州 {checkIn} 的房间，一间就够",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9" },
+    "stage": "COLLECTING"
+  },
+  {
+    "id": "hard-noise-phone",
+    "msg": "我姓王，手机 13800138000，想订杭州 {checkIn} 到 {checkOut} 一间大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "hard-multi-intent",
+    "msg": "杭州 {checkIn} 到 {checkOut} 有房吗？有的话就帮我订一间大床房",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "hard-long-sentence",
+    "msg": "是这样的，我这周要去杭州出差三天，想找个离市区近一点的酒店，{checkIn} 入住，{checkOut} 走，一间大床房就行，麻烦了",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "bedType": "大床" },
+    "stage": "SEARCHED"
+  },
+  {
+    "id": "hard-last-time",
+    "msg": "帮我找我上次订的那家酒店",
+    "intent": "MYBOOKINGS",
+    "slots": {},
+    "stage": null
+  },
+  {
+    "id": "gap-facility-question",
+    "msg": "杭州西湖国宾馆有停车场吗？能带宠物吗",
+    "intent": "QUERY",
+    "slots": {},
+    "stage": "UNSUPPORTED"
+  },
+  {
+    "id": "hard-count-first",
+    "msg": "两间大床房，杭州 {checkIn} 到 {checkOut}",
+    "intent": "BOOK",
+    "slots": { "city": "杭州", "checkIn": "@+9", "checkOut": "@+11", "roomCount": "2", "bedType": "大床" },
+    "stage": "SEARCHED"
+  }]
