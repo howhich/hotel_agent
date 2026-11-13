@@ -36,6 +36,7 @@ $files = @(
     'p4_agent_test.ps1',
     'p4_agent_hitl_test.ps1',
     'p4_agent_eval.ps1',
+    'p4_kb_eval.ps1',
     'check-syntax.ps1'
 )
 

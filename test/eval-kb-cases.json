@@ -1,0 +1,21 @@
+[
+  { "id": "gb-parking",  "q": "有停车场吗",           "hotelId": 1002, "section": "停车与交通" },
+  { "id": "gb-checkin",  "q": "几点可以入住",         "hotelId": 1002, "section": "入住与退房" },
+  { "id": "gb-pet",      "q": "能带宠物吗",           "hotelId": 1002, "section": "宠物政策" },
+  { "id": "gb-breakfast","q": "早餐几点开始",         "hotelId": 1002, "section": "餐饮与设施" },
+  { "id": "gb-cancel",   "q": "退订要扣多少钱",       "hotelId": 1002, "section": "取消与退订" },
+
+  { "id": "xp-parking",  "q": "车位多不多",           "hotelId": 1001, "section": "停车与交通" },
+  { "id": "xp-pet",      "q": "能不能带小狗",         "hotelId": 1001, "section": "宠物政策" },
+  { "id": "xp-cancel",   "q": "提前几天取消不收费",   "hotelId": 1001, "section": "取消与退订" },
+
+  { "id": "hb-pet",      "q": "可以带小型犬吗",       "hotelId": 1003, "section": "宠物政策" },
+  { "id": "hb-metro",    "q": "离地铁站远不远",       "hotelId": 1003, "section": "停车与交通" },
+
+  { "id": "xx-pet",      "q": "带着猫能住吗",         "hotelId": 1004, "section": "宠物政策" },
+  { "id": "xx-breakfast","q": "早餐吃什么",           "hotelId": 1004, "section": "餐饮与设施" },
+  { "id": "xx-cancel",   "q": "临时有事去不了怎么退", "hotelId": 1004, "section": "取消与退订" },
+
+  { "id": "qj-pool",     "q": "有恒温泳池吗",         "hotelId": 1005, "section": "餐饮与设施" },
+  { "id": "qj-airport",  "q": "能安排接机吗",         "hotelId": 1005, "section": "停车与交通" }
+]

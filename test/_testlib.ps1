@@ -126,7 +126,7 @@ function LoginAdmin([string]$username = 'admin', [string]$password = '123456') {
 #   而"普通用户调运维接口要 403"这件事，在 p4_authz_test 里用 -AsUser 专门验。
 $script:OpsPrefixes = @(
     '/booking/inv/', '/booking/maintenance/', '/booking/delay/',
-    '/booking/hotel/geo/', '/booking/hotel/price/', '/booking/expire-scan'
+    '/booking/hotel/geo/', '/booking/hotel/price/', '/booking/hotel/kb/', '/booking/expire-scan'
 )
 function IsOpsPath([string]$path) {
     foreach ($prefix in $script:OpsPrefixes) {
