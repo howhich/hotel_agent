@@ -139,6 +139,63 @@ public class HotelKbIndex {
     // 检索
     // =========================================================================
 
+    /**
+     * 同义词表：key 是"归一后的核心词"，value 是可能的说法
+     *
+     * <p>只用了几十个词 —— 因为失败样本高度集中（宠物、取消、停车、接送机、入住）。
+     * 真实项目里这张表应当来自搜索日志的 bad case 统计，而不是拍脑袋想。
+     */
+    private static final Map<String, List<String>> SYNONYMS = Map.of(
+            "宠物", List.of("小狗", "小猫", "猫", "狗", "犬", "毛孩子", "带宠物", "宠物友好"),
+            "取消", List.of("退订", "退掉", "去不了", "不去了", "怎么退", "取消订单"),
+            "停车", List.of("车位", "车库", "泊车", "停车位", "能停车"),
+            "接送机", List.of("接机", "送机", "机场接送", "班车"),
+            "入住", List.of("几点到", "办理入住", "checkin", "check in"),
+            "早餐", List.of("含早", "早饭", "吃饭")
+    );
+
+    /**
+     * 把查询展开成多路：原始查询 + 命中的同义词族
+     *
+     * <p>例：「能不能带小狗」 → ["能不能带小狗", "宠物", "小狗", "猫", ...]
+     * 其中"宠物"这一路能命中「宠物政策」小节。
+     *
+     * <p>去重并限制条数：路数太多会让 should 的分数被稀释，也会拖慢检索。
+     */
+    private static List<String> expandQuery(String question) {
+        List<String> out = new ArrayList<>();
+        out.add(question);
+        for (Map.Entry<String, List<String>> e : SYNONYMS.entrySet()) {
+            boolean hit = question.contains(e.getKey());
+            if (!hit) {
+                for (String syn : e.getValue()) {
+                    if (question.contains(syn)) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (!hit) {
+                continue;
+            }
+            if (!out.contains(e.getKey())) {
+                out.add(e.getKey());
+            }
+            for (String syn : e.getValue()) {
+                if (!out.contains(syn)) {
+                    out.add(syn);
+                }
+                if (out.size() >= 8) {
+                    break;
+                }
+            }
+            if (out.size() >= 8) {
+                break;
+            }
+        }
+        return out;
+    }
+
     /** 一条检索结果（带引用来源） */
     public record KbHit(Long hotelId, String hotelName, String section, String snippet, double score) {
     }
@@ -155,14 +212,31 @@ public class HotelKbIndex {
         Map<String, Object> multiMatch = new LinkedHashMap<>();
         multiMatch.put("query", question);
         multiMatch.put("fields", List.of("content^2", "section.txt^2"));
-        Map<String, Object> must = Map.of("multi_match", multiMatch);
+        // ★ 查询侧同义词扩展（P5.4）
+        //
+        //   词法检索的天花板就是"字面不一致就召不回"：
+        //     「能不能带小狗」「带着猫能住吗」  -> 与「宠物」零重叠
+        //     「能安排接机吗」                -> 原文写"接送机"，切片是 接送/送机，不含 接机
+        //   所以把查询展开成多路 should，任一路命中即可。
+        //   放在【查询侧】而不是索引侧：ngram 会先切词，同义词过滤器顺序很难搞；
+        //   而查询侧展开是纯 Java，看得见、好调、好测，而且【不需要重建索引】。
+        List<Map<String, Object>> should = new ArrayList<>();
+        for (String variant : expandQuery(question)) {
+            Map<String, Object> mm = new LinkedHashMap<>();
+            mm.put("query", variant);
+            mm.put("fields", List.of("content^2", "section.txt^2"));
+            should.add(Map.of("multi_match", mm));
+        }
+        Map<String, Object> innerBool = new LinkedHashMap<>();
+        innerBool.put("should", should);
+        innerBool.put("minimum_should_match", 1);
 
         Map<String, Object> bool = new LinkedHashMap<>();
         bool.put("filter", hotelId == null
                 ? List.of(Map.of("term", Map.of("docType", "doc")))
                 : List.of(Map.of("term", Map.of("docType", "doc")),
                          Map.of("term", Map.of("hotelId", hotelId))));
-        bool.put("must", List.of(must));
+        bool.put("must", List.of(Map.of("bool", innerBool)));
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("size", Math.max(1, Math.min(size, 10)));
