@@ -168,7 +168,7 @@ public class HotelKbIndex {
         body.put("query", Map.of("bool", bool));
         body.put("highlight", Map.of("fields", Map.of("content", Map.of())));
 
-        String resp = send("POST", "/" + indexName + "/_search", toJson(body));
+        String resp = send("POST", "/" + indexName + "/_search", body);   // ★ 传对象，不要传已序列化的字符串（否则会双重编码）
         List<KbHit> out = new ArrayList<>();
         if (resp == null) {
             return out;
@@ -215,7 +215,7 @@ public class HotelKbIndex {
                 "filter", List.of(Map.of("term", Map.of("docType", "hotel_name"))),
                 "must", List.of(Map.of("match", Map.of("hotelName", match))))));
 
-        String resp = send("POST", "/" + indexName + "/_search", toJson(body));
+        String resp = send("POST", "/" + indexName + "/_search", body);   // ★ 传对象，不要传已序列化的字符串（否则会双重编码）
         if (resp == null) {
             return null;
         }
