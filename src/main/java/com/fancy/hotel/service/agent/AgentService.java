@@ -59,6 +59,7 @@ public class AgentService {
     private final AgentSessionStore sessionStore;
     private final HotelSearchTool searchTool;
     private final MyBookingTool myBookingTool;
+    private final com.fancy.hotel.service.HotelKbIndex kbIndex;
     private final BookingService bookingService;
     private final ObjectMapper objectMapper;
     /** 草案多久之后就不算数了（分钟） */
@@ -70,6 +71,7 @@ public class AgentService {
                         AgentSessionStore sessionStore,
                         HotelSearchTool searchTool,
                         MyBookingTool myBookingTool,
+                        com.fancy.hotel.service.HotelKbIndex kbIndex,
                         BookingService bookingService,
                         ObjectMapper objectMapper,
                         @Value("${hotel.agent.draft-ttl-minutes:5}") int draftTtlMinutes,
@@ -78,6 +80,7 @@ public class AgentService {
         this.sessionStore = sessionStore;
         this.searchTool = searchTool;
         this.myBookingTool = myBookingTool;
+        this.kbIndex = kbIndex;
         this.bookingService = bookingService;
         this.objectMapper = objectMapper;
         this.draftTtlMinutes = Math.max(1, draftTtlMinutes);
@@ -155,6 +158,7 @@ public class AgentService {
         switch (effectiveIntent) {
             case "BOOK", "QUERY" -> reply = handleSearch(session);
             case "CONFIRM" -> reply = handleConfirm(session);
+            case "FACILITY" -> reply = handleFacility(session, message);
             case "MYBOOKINGS" -> reply = handleMyBookings(session);
             case "CANCEL" -> reply = handleCancel(session);
             case "RESCHEDULE" -> reply = handleReschedule(session);
@@ -189,6 +193,9 @@ public class AgentService {
                 + "        填那个酒店的完整名字（照抄候选里的写法），或序号 \"1\"/\"2\"/\"3\"；\n"
                 + "        其它情况一律 null\n"
                 + "- intent 还可以是 MYBOOKINGS（\"我的订单\"\"我订了什么\"\"查下我的订单\"）\n"
+                + "- intent 还可以是 FACILITY（问酒店的设施/政策/服务：有没有停车场、能带宠物吗、\n"
+                + "        几点退房、怎么退订、含不含早餐、有没有泳池）—— 这类问题会去查酒店资料\n"
+                + "- slots.hotelName: 用户提到的酒店名（如\"西湖国宾馆\"）；没有就 null\n"
                 + "- slots.bookingId: 用户提到的订单号（纯数字串）；没有就 null\n"
                 + "- slots.newCheckIn / slots.newCheckOut: 【只有改期(RESCHEDULE)才填】新的入住/离店日期；\n"
                 + "        预订和查询一律填在 checkIn/checkOut 里，不要填这两个\n"
@@ -283,7 +290,7 @@ public class AgentService {
         String bedType = slots.get("bedType");
 
         List<AgentReplyVO.Candidate> found = searchTool.search(
-                slots.get("city"), checkIn, checkOut, roomCount, bedType);
+                slots.get("city"), slots.get("hotelName"), checkIn, checkOut, roomCount, bedType);
 
         if (found.isEmpty()) {
             session.clearDraft();
@@ -1019,6 +1026,57 @@ public class AgentService {
         m.put("description", desc);
         return m;
     }
+    // =========================================================================
+    // 设施 / 政策问答（P5.3，RAG）
+    //
+    // ★ 三条要求，缺一条就变成"编"：
+    //   ① 只依据检索到的原文回答，并且把出处写出来
+    //   ② 检索不到就明说"资料里没有"，不许自由发挥
+    //   ③ 用户点名了酒店就按酒店过滤，别拿 A 家的条款去答 B 家的问题
+    // =========================================================================
+
+    private AgentReplyVO handleFacility(AgentSession session, String question) {
+        String hint = session.getSlots().get("hotelName");
+        Long hotelId = isBlank(hint) ? null : kbIndex.matchHotelId(hint);
+        List<com.fancy.hotel.service.HotelKbIndex.KbHit> hits = kbIndex.retrieve(question, hotelId, 3);
+
+        if (hits.isEmpty()) {
+            // ★ 拒答：宁可不答，也不要让模型编一条不存在的政策
+            return plain(session, "NO_ANSWER",
+                    "这个我这边没有查到可靠的资料，怕答错，所以不敢乱说。"
+                            + "你可以问前台，或者换个说法再问我一次。");
+        }
+
+        // 只取最高分的两条，够回答就行，也给用户留一点余地
+        int take = Math.min(2, hits.size());
+        StringBuilder sb = new StringBuilder();
+        sb.append("我查到这些：\n");
+        for (int i = 0; i < take; i++) {
+            com.fancy.hotel.service.HotelKbIndex.KbHit h = hits.get(i);
+            sb.append(i + 1).append(". ").append(stripEm(h.snippet())).append('\n');
+            sb.append("   依据：").append(nz(h.hotelName())).append(" · ").append(nz(h.section())).append('\n');
+        }
+        if (hotelId == null) {
+            sb.append("（你没说具体哪家，我把相关的都列出来了；说酒店名我可以只查那一家。）");
+        }
+        log.info("设施问答: question={}, hotelId={}, hits={}", question, hotelId, hits.size());
+
+        return AgentReplyVO.builder()
+                .sessionId(session.getSessionId())
+                .intent(session.getIntent())
+                .stage("ANSWERED")
+                .slots(session.getSlots())
+                .missing(List.of())
+                .candidates(List.of())
+                .reply(sb.toString())
+                .build();
+    }
+
+    /** 检索结果里的 <em> 高亮标记对纯文本接口没意义，去掉 */
+    private static String stripEm(String s) {
+        return s == null ? "" : s.replace("<em>", "").replace("</em>", "");
+    }
+
     private static String nz(String s) {
         return s == null ? "" : s;
     }

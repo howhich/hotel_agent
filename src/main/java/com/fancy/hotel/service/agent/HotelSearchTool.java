@@ -45,6 +45,7 @@ public class HotelSearchTool {
     private final HotelMapper hotelMapper;
     private final RoomTypeMapper roomTypeMapper;
     private final BookingService bookingService;
+    private final com.fancy.hotel.service.HotelKbIndex kbIndex;
 
     /**
      * 按条件搜索可订的房型，按总价升序
@@ -53,7 +54,39 @@ public class HotelSearchTool {
      */
     public List<AgentReplyVO.Candidate> search(String city, LocalDate checkIn, LocalDate checkOut,
                                                int roomCount, String bedType) {
+        return search(city, null, checkIn, checkOut, roomCount, bedType);
+    }
+
+    /**
+     * 带酒店名的搜索（P5.3）
+     *
+     * <p>原来的问题是：用户说"我要订杭州西湖国宾馆"，酒店名<b>完全没有参与检索</b> ——
+     * 只能按城市查，于是把杭州所有酒店都列出来。
+     *
+     * <p>现在用 ES 做名称匹配（支持错别字，如"西部国宾馆"→"杭州西湖国宾馆"）。
+     * 认不出来就<b>不收窄</b>，宁可多列几家，也不要因为认错而把正确答案筛掉。
+     */
+    public List<AgentReplyVO.Candidate> search(String city, String hotelNameHint,
+                                               LocalDate checkIn, LocalDate checkOut,
+                                               int roomCount, String bedType) {
         List<Hotel> hotels = findHotelsByCity(city);
+        if (hotelNameHint != null && !hotelNameHint.isBlank() && !hotels.isEmpty()) {
+            Long matched = kbIndex.matchHotelId(hotelNameHint);
+            if (matched != null) {
+                List<Hotel> narrowed = new ArrayList<>();
+                for (Hotel h : hotels) {
+                    if (matched.equals(h.getHotelId())) {
+                        narrowed.add(h);
+                    }
+                }
+                if (!narrowed.isEmpty()) {
+                    log.debug("按酒店名收窄: 提示[{}] -> hotelId={}", hotelNameHint, matched);
+                    hotels = narrowed;
+                }
+            } else {
+                log.debug("酒店名没认出来，不做收窄: {}", hotelNameHint);
+            }
+        }
         if (hotels.isEmpty()) {
             return List.of();
         }

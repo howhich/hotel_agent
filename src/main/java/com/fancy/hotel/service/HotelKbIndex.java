@@ -42,6 +42,17 @@ public class HotelKbIndex {
     /** 名称匹配的最低分：低于这个分数就当"没认出来"，宁可反问也不要乱认 */
     private static final double NAME_MATCH_MIN_SCORE = 0.3;
 
+    /**
+     * 检索的最低相关度
+     *
+     * ★ 没有这个阈值，"拒答"就形同虚设：
+     *   ngram 检索几乎总能召回点什么（只要有一个二字切片相同），
+     *   于是"这家有室内恒温泳池吗"也会拿回一堆停车/宠物的段落。
+     *   分数低于这个值的一律丢掉，让上层走到"查不到"的分支。
+     *   实测：真正相关的段落 7~9 分，不相关的 1~2 分，所以 2.5 是个安全的界线。
+     */
+    private static final double MIN_RELEVANCE = 2.5;
+
     private final HotelKbMapper kbMapper;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
@@ -180,16 +191,21 @@ public class HotelKbIndex {
                 JsonNode hl = h.path("highlight").path("content");
                 String snippet = hl.isArray() && !hl.isEmpty()
                         ? hl.get(0).asText() : src.path("content").asText("");
+                double score = h.path("_score").asDouble(0);
+                if (score < MIN_RELEVANCE) {
+                    continue;       // 不相关就丢掉，让上层去"拒答"，而不是拿它凑数
+                }
                 out.add(new KbHit(
                         src.path("hotelId").asLong(),
                         src.path("hotelName").asText(""),
                         src.path("section").asText(""),
                         snippet,
-                        h.path("_score").asDouble(0)));
+                        score));
             }
         } catch (Exception e) {
             log.warn("解析检索结果失败: {}", e.getMessage());
         }
+        log.debug("检索[{}] 命中 {} 条（阈值 {}）", question, out.size(), MIN_RELEVANCE);
         return out;
     }
 
