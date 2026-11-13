@@ -46,6 +46,7 @@ public class WebConfig implements WebMvcConfigurer {
                         "/booking/delay/**",          // 延迟队列：stat / rebuild / sweep
                         "/booking/hotel/geo/**",      // GEO 索引：rebuild / stat
                         "/booking/hotel/price/**",    // 改价
+                        "/booking/hotel/kb/**",       // 知识库索引：重建 / 试检索
                         "/booking/expire-scan"        // 手动批量释放超时订单
                 )
                 .order(2);

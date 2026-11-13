@@ -111,6 +111,14 @@ hotel:
     inv-load-wait-rounds: 40
     inv-load-wait-interval-ms: 50
 
+  # P5.3：Elasticsearch（酒店知识库检索）
+  #   只用到建索引 / bulk / search 三个 API，所以没引入 ES 官方客户端，直接用 JDK HttpClient
+  #   ES 走 SSH 隧道：远端 127.0.0.1:9200 -> 本地 127.0.0.1:9200
+  es:
+    base-url: ${ES_BASE_URL:http://127.0.0.1:9200}
+    index: ${ES_INDEX:hotel_kb_v1}
+    timeout-seconds: 10
+
   # P4.3：Agent（大模型）
   agent:
     # ★ 没设这个环境变量也能启动，只是 /agent/chat 会返回 503。
