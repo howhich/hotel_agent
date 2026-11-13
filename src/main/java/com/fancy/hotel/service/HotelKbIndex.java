@@ -42,16 +42,6 @@ public class HotelKbIndex {
     /** 名称匹配的最低分：低于这个分数就当"没认出来"，宁可反问也不要乱认 */
     private static final double NAME_MATCH_MIN_SCORE = 0.3;
 
-    /**
-     * 检索的最低相关度
-     *
-     * ★ 没有这个阈值，"拒答"就形同虚设：
-     *   ngram 检索几乎总能召回点什么（只要有一个二字切片相同），
-     *   于是"这家有室内恒温泳池吗"也会拿回一堆停车/宠物的段落。
-     *   分数低于这个值的一律丢掉，让上层走到"查不到"的分支。
-     *   实测：真正相关的段落 7~9 分，不相关的 1~2 分，所以 2.5 是个安全的界线。
-     */
-    private static final double MIN_RELEVANCE = 2.5;
 
     private final HotelKbMapper kbMapper;
     private final ObjectMapper objectMapper;
@@ -164,7 +154,7 @@ public class HotelKbIndex {
         }
         Map<String, Object> multiMatch = new LinkedHashMap<>();
         multiMatch.put("query", question);
-        multiMatch.put("fields", List.of("content^2", "section"));
+        multiMatch.put("fields", List.of("content^2", "section.txt^2"));
         Map<String, Object> must = Map.of("multi_match", multiMatch);
 
         Map<String, Object> bool = new LinkedHashMap<>();
@@ -192,9 +182,15 @@ public class HotelKbIndex {
                 String snippet = hl.isArray() && !hl.isEmpty()
                         ? hl.get(0).asText() : src.path("content").asText("");
                 double score = h.path("_score").asDouble(0);
-                if (score < MIN_RELEVANCE) {
-                    continue;       // 不相关就丢掉，让上层去"拒答"，而不是拿它凑数
-                }
+                // ★ 这里【故意】不按分数过滤。
+                //
+                //   原先有个 MIN_RELEVANCE=2.5 的过滤，本意是让"查不到"走拒答分支。
+                //   实测证明那是错的：
+                //     · 拒答的正确做法是 grounded generation（模型判断资料够不够），
+                //       分数只该用来【排序】，不该用来【裁决】；
+                //     · 而按分数过滤会误杀召回 —— recall@3 只有 60%，其中一部分
+                //       就是被这个阈值滤成了空结果（"几点可以入住""退订要扣多少钱"）。
+                //   教训：同一个数字不要既当排序、又当裁决。
                 out.add(new KbHit(
                         src.path("hotelId").asLong(),
                         src.path("hotelName").asText(""),
@@ -205,7 +201,7 @@ public class HotelKbIndex {
         } catch (Exception e) {
             log.warn("解析检索结果失败: {}", e.getMessage());
         }
-        log.debug("检索[{}] 命中 {} 条（阈值 {}）", question, out.size(), MIN_RELEVANCE);
+        log.debug("检索[{}] 命中 {} 条", question, out.size());
         return out;
     }
 
@@ -278,7 +274,11 @@ public class HotelKbIndex {
         props.put("hotelId", Map.of("type", "long"));
         props.put("hotelName", Map.of("type", "text", "analyzer", "cn_ngram",
                 "fields", Map.of("kw", Map.of("type", "keyword"))));
-        props.put("section", Map.of("type", "keyword"));
+        // ★ section 必须是 keyword（精确、可聚合），但检索时要用【分词后的版本】：
+        //   原来只有 keyword，我却把它放进 multi_match —— keyword 不分词，
+        //   于是"退订"永远匹配不上小节标题「取消与退订」，白丢一路召回。
+        props.put("section", Map.of("type", "keyword",
+                "fields", Map.of("txt", Map.of("type", "text", "analyzer", "cn_ngram"))));
         props.put("content", Map.of("type", "text", "analyzer", "cn_ngram"));
 
         Map<String, Object> body = new LinkedHashMap<>();
