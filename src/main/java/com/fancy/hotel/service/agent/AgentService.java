@@ -1041,37 +1041,61 @@ public class AgentService {
         List<com.fancy.hotel.service.HotelKbIndex.KbHit> hits = kbIndex.retrieve(question, hotelId, 3);
 
         if (hits.isEmpty()) {
-            // ★ 拒答：宁可不答，也不要让模型编一条不存在的政策
-            return plain(session, "NO_ANSWER",
-                    "这个我这边没有查到可靠的资料，怕答错，所以不敢乱说。"
-                            + "你可以问前台，或者换个说法再问我一次。");
+            return noAnswer(session, question);
         }
 
-        // 只取最高分的两条，够回答就行，也给用户留一点余地
-        int take = Math.min(2, hits.size());
-        StringBuilder sb = new StringBuilder();
-        sb.append("我查到这些：\n");
-        for (int i = 0; i < take; i++) {
+        // ★ grounded generation：把检索到的原文交给模型，要求它【只依据资料】回答。
+        //
+        //   为什么不自己拼段落、靠分数阈值判断"答不答得了"：
+        //   ngram 二元切分几乎总能召回点什么（"民宿""免费"这类二字切片到处都是），
+        //   勉强沾边的段落也能拿到 3 分 —— 阈值区分不了"没查到"和"查到点边角"。
+        //   而"这份资料够不够回答"恰恰是模型擅长、又能被结构化约束的判断。
+        StringBuilder material = new StringBuilder();
+        for (int i = 0; i < hits.size(); i++) {
             com.fancy.hotel.service.HotelKbIndex.KbHit h = hits.get(i);
-            sb.append(i + 1).append(". ").append(stripEm(h.snippet())).append('\n');
-            sb.append("   依据：").append(nz(h.hotelName())).append(" · ").append(nz(h.section())).append('\n');
+            material.append("[").append(i + 1).append("] ").append(nz(h.hotelName()))
+                    .append(" · ").append(nz(h.section())).append('\n')
+                    .append(stripEm(h.snippet())).append("\n\n");
         }
-        if (hotelId == null) {
-            sb.append("（你没说具体哪家，我把相关的都列出来了；说酒店名我可以只查那一家。）");
-        }
-        log.info("设施问答: question={}, hotelId={}, hits={}", question, hotelId, hits.size());
+        String system = "你是酒店客服助手。只能依据【资料】回答用户的问题。\n"
+                + "资料里没有明确写到的信息，必须如实说没有查到，绝对不要推测或编造。\n"
+                + "只输出 JSON：{\"found\":true 或 false,\"answer\":\"给用户看的中文回答\"}\n"
+                + "answer 简洁一点，可以说「资料[1]里提到…」来给出处。";
+        String user = "资料：\n" + material + "问题：" + question;
 
-        return AgentReplyVO.builder()
-                .sessionId(session.getSessionId())
-                .intent(session.getIntent())
-                .stage("ANSWERED")
-                .slots(session.getSlots())
-                .missing(List.of())
-                .candidates(List.of())
-                .reply(sb.toString())
-                .build();
+        try {
+            String json = llmClient.completeJson(system, user);
+            JsonNode node = objectMapper.readTree(json);
+            boolean found = node.path("found").asBoolean(false);
+            String answer = node.path("answer").asText("").trim();
+            if (!found || answer.isEmpty()) {
+                return noAnswer(session, question);
+            }
+            log.info("设施问答(grounded): question={}, hotelId={}, hits={}", question, hotelId, hits.size());
+            return AgentReplyVO.builder()
+                    .sessionId(session.getSessionId())
+                    .intent(session.getIntent())
+                    .stage("ANSWERED")
+                    .slots(session.getSlots())
+                    .missing(List.of())
+                    .candidates(List.of())
+                    .reply(answer)
+                    .build();
+        } catch (BusinessException e) {
+            throw e;                     // key 没配 / 模型挂了：如实报出去，不要假装拒答
+        } catch (Exception e) {
+            log.warn("设施问答解析失败: {}", e.getMessage());
+            return noAnswer(session, question);
+        }
     }
 
+    /** 拒答：宁可不答，也不要编一条不存在的政策 */
+    private AgentReplyVO noAnswer(AgentSession session, String question) {
+        log.info("设施问答拒答（资料里没有）: question={}", question);
+        return plain(session, "NO_ANSWER",
+                "这个我这边没有查到可靠的资料，怕答错，所以不敢乱说。"
+                        + "你可以问前台，或者换个说法再问我一次。");
+    }
     /** 检索结果里的 <em> 高亮标记对纯文本接口没意义，去掉 */
     private static String stripEm(String s) {
         return s == null ? "" : s.replace("<em>", "").replace("</em>", "");

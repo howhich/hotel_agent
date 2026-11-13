@@ -262,9 +262,16 @@
   {
     "id": "gap-facility-question",
     "msg": "杭州西湖国宾馆有停车场吗？能带宠物吗",
-    "intent": "QUERY",
+    "intent": "FACILITY",
     "slots": {},
-    "stage": "UNSUPPORTED"
+    "stage": "ANSWERED"
+  },
+  {
+    "id": "gap-refusal",
+    "msg": "杭州西溪湿地民宿有室内恒温泳池吗",
+    "intent": "FACILITY",
+    "slots": {},
+    "stage": "NO_ANSWER"
   },
   {
     "id": "hard-count-first",
