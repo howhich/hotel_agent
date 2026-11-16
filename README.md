@@ -116,7 +116,7 @@ Redis 缓存                       可随时删掉
 
 ## 接口一览
 
-共 **27 个**接口。除 `/auth/login` 外都需要 `Authorization: Bearer <token>`；标 🔒 的需要管理员。
+共 **32 个**接口。除 `/auth/login` 外都需要 `Authorization: Bearer <token>`；标 🔒 的需要管理员。
 
 ### 认证
 
@@ -149,6 +149,9 @@ Redis 缓存                       可随时删掉
 | POST | `/booking/hotel/price/update` 🔒 | 改某天房价 |
 | POST | `/booking/hotel/geo/rebuild` 🔒 | 重建 GEO 索引 |
 | GET | `/booking/hotel/geo/stat` 🔒 | GEO 索引状态 |
+| GET | `/booking/hotel/search` | 按名称搜酒店（ES 模糊匹配，容错别字） |
+| POST | `/booking/hotel/kb/rebuild` 🔒 | 重建知识库索引 |
+| GET | `/booking/hotel/kb/search` 🔒 | 试检索（调试用） |
 
 ### 库存缓存（运维）
 

@@ -288,40 +288,72 @@ public class HotelKbIndex {
      *
      * @return 认不出来返回 null（调用方应当反问用户，而不是瞎猜一个）
      */
-    public Long matchHotelId(String name) {
-        if (name == null || name.isBlank()) {
-            return null;
+    /** 一条酒店名称匹配结果（带分数，调用方可以自己决定阈值） */
+    public record HotelNameHit(Long hotelId, String hotelName, double score) {
+    }
+
+    /**
+     * 按酒店名做模糊匹配（P5.5）
+     *
+     * <p>{@code fuzziness=AUTO} 在中文 ngram 上实测有效："西部国宾馆"（错一个字）
+     * 也能匹配到"杭州西湖国宾馆"，只是分数减半 —— 所以用分数阈值兜住，避免乱认。
+     *
+     * <p>ES 不可用时返回空列表（不是抛异常）：搜索失败应当降级成"没搜到"，
+     * 不该让用户看到一个 500。
+     *
+     * @param size 最多返回几个（上限 10）
+     */
+    public List<HotelNameHit> searchHotels(String keyword, int size) {
+        List<HotelNameHit> out = new ArrayList<>();
+        if (keyword == null || keyword.isBlank()) {
+            return out;
         }
         Map<String, Object> match = new LinkedHashMap<>();
-        match.put("query", name);
+        match.put("query", keyword.trim());
         match.put("fuzziness", "AUTO");
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("size", 1);
+        body.put("size", Math.max(1, Math.min(size, 10)));
         body.put("query", Map.of("bool", Map.of(
                 "filter", List.of(Map.of("term", Map.of("docType", "hotel_name"))),
                 "must", List.of(Map.of("match", Map.of("hotelName", match))))));
 
-        String resp = send("POST", "/" + indexName + "/_search", body);   // ★ 传对象，不要传已序列化的字符串（否则会双重编码）
+        String resp = send("POST", "/" + indexName + "/_search", body);
         if (resp == null) {
-            return null;
+            return out;
         }
         try {
             JsonNode hits = objectMapper.readTree(resp).path("hits").path("hits");
-            if (!hits.isArray() || hits.isEmpty()) {
-                return null;
+            for (JsonNode h : hits) {
+                double score = h.path("_score").asDouble(0);
+                if (score < NAME_MATCH_MIN_SCORE) {
+                    continue;        // 分数太低就当没认出来，宁可空也不要给一堆不相干的
+                }
+                JsonNode src = h.path("_source");
+                out.add(new HotelNameHit(
+                        src.path("hotelId").asLong(),
+                        src.path("hotelName").asText(""),
+                        score));
             }
-            double score = hits.get(0).path("_score").asDouble(0);
-            if (score < NAME_MATCH_MIN_SCORE) {
-                log.debug("名称匹配分数过低({})，当作没认出来: {}", score, name);
-                return null;
-            }
-            return hits.get(0).path("_source").path("hotelId").asLong();
         } catch (Exception e) {
-            log.warn("解析名称匹配结果失败: {}", e.getMessage());
-            return null;
+            log.warn("解析酒店名匹配结果失败: {}", e.getMessage());
         }
+        return out;
     }
 
+    /**
+     * 按酒店名（可带错别字）找 hotelId
+     *
+     * <p>只是 {@link #searchHotels} 取第一条的便捷封装 —— 保留"认不出来返回 null"的语义，
+     * 调用方据此决定要不要收窄，而不是瞎猜一个。
+     */
+    public Long matchHotelId(String name) {
+        List<HotelNameHit> hits = searchHotels(name, 1);
+        if (hits.isEmpty()) {
+            log.debug("酒店名没认出来: {}", name);
+            return null;
+        }
+        return hits.get(0).hotelId();
+    }
     // =========================================================================
     // HTTP 与工具
     // =========================================================================
