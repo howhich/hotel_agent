@@ -514,6 +514,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\p0_flow_test.ps1
 | `p3_*` | 穿透 / 击穿 / 雪崩 / 价格缓存 |
 | `p4_auth_test` / `p4_authz_test` | 登录、越权 403、运维接口要管理员 |
 | `p4_agent_test` / `p4_agent_hitl_test` | Agent 多轮、确认后下单（演示套件） |
+| `p6_multi_instance_test.ps1` | **双实例用（8080+8081）**：并发下单 bookingId 不重复 / 超时关单只释放一次 / 会话跨实例共享 / 零漂移 |
+
+> **双实例怎么跑**：`mvn spring-boot:run` 起 8080，再
+> `mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8081` 起 8081。
+> 只起一个实例时 `p6_multi_instance_test` 会自动 `[SKIP]` 退出 0。
+>
+> 为什么值得单独验：单实例跑久了，那些"分布式"的设计（原子认领、雪花 ID、幂等、会话共享）
+> **其实从没在并发下被验证过** —— 单实例不出问题，可能只是因为压根没并发。
 
 **14 个稳定套件共 301 项断言**，是提交前必须全绿的回归门槛。
 
