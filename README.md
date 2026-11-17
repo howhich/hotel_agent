@@ -1,615 +1,438 @@
-﻿# hotel-booking
+# hotel-booking
 
-**酒店 / 民宿预订后端**，重点解决两件真实项目里最容易做错的事：
+<div align="center">
 
-- **区间库存**（房型 × 日期区间）在高并发下不超卖、不改错
-- **接入 Agent**（说人话订房），但**不让模型决定订单内容**
+**酒店预订场景的 Spring Boot 全栈实战：区间库存高并发 + Agent + RAG**
 
----
+一套代码、两条学习主线 —— 逐日库存、条件 UPDATE、台账对账、Lua 原子预占、延迟队列、GEO、缓存三兄弟、幂等这些高并发考点全部长在真实业务上；同一套业务之上，再叠一层意图路由 + 工具编排 + HITL 确认 + RAG 问答。
 
-## 为什么值得看
+![Java](https://img.shields.io/badge/Java-21-ff6b35)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5.9-6db33f)
+![MyBatis-Plus](https://img.shields.io/badge/MyBatis--Plus-3.5.9-0052cc)
+![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1)
+![Redis](https://img.shields.io/badge/Redis-7.x-dc382d)
+![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.12-005571)
+![LLM](https://img.shields.io/badge/LLM-DeepSeek-4b6bfb)
+![Assertions](https://img.shields.io/badge/Assertions-377-brightgreen)
 
-这个项目里有三个"看起来简单、做对了很难"的点：
+</div>
 
-| 表面 | 实际 |
-|---|---|
-| 订个房，扣库存 | 库存单元是「房型 × 日期区间」，一个订单要跨多天同时成功 |
-| 加个缓存少查库 | 真正的难点不是"变快"，是让缓存和数据库**永远不打架** |
-| 加个大模型 | 难点不是"调通 API"，是让它**帮用户订房的同时不能改单** |
+## 项目简介
 
-业务闭环是完整的：
+`hotel-booking` 是一个酒店预订业务系统 + 一个能真正办成事的预订 Agent。同一套代码上有**两条相互独立的学习主线**：
 
-```
-登录 → 查可订 → 报价 → 下单 → 支付 → 改期 → 取消
-        ↑                          ↓
-     Agent 也能走完整条：说话 → 查 → 出草案 → 说"确认" → 真的下单
-```
+| 主线 | 能学到什么 | 入口 |
+| --- | --- | --- |
+| **区间库存与高并发** | 逐日库存建模、条件 UPDATE 唯一裁决、台账与零漂移对账、Lua 原子预占与事务补偿、ZSet 延迟队列、GEO 附近、缓存三兄弟、接口幂等、双实例并发正确性 | 下方 [区间库存实战](#区间库存实战)；逐考点的代码级文档在 [`docs/`](docs/)（6 篇，一个阶段一篇） |
+| **Agent 与 RAG** | 意图路由、槽位多轮、工具编排（两种实现并做过 A/B）、订单 HITL 确认断点、RAG 引用溯源与拒答、三层评测体系 | 下方 [Agent 与 RAG 链路](#agent-与-rag-链路) |
 
----
+两条主线不是硬拼在一起：**Redis 既是 Agent 的对话状态存储**（槽位、候选草案、待确认项），也是业务侧的高并发底座（库存缓存、锁、幂等、延迟队列）。所以读 Agent 链路时会反复撞见 Redis 的用法，反之亦然。
 
-## 核心难点：库存不能用计数器
+### 和常见"订房 Demo"的区别
 
-打车系统里"一个城市有 N 辆车"是一个**数**。酒店不是。
+**库存单元不是「房型」，而是「房型 × 日期区间」。**
 
-酒店库存的天然形状是**按天**的：
+打车系统里"一个城市有 N 辆车"是一个**数**；酒店不是：
 
 ```
 房型 2001，总共 3 间
              11-19   11-20   11-21   11-22
 sold_rooms     1       2       3       0      ← 每天一行，UNIQUE(room_type_id, stay_date)
 
-11-20 住到 11-22 → 占的是 11-20 和 11-21 两天
-                   11-22 那天是别人的
+11-20 住到 11-22 → 占 11-20、11-21 两天，11-22 那天是别人的
 ```
 
-一个 2 晚的订单要**同时**在这 2 行上成功；任何一行不够就整单失败，**一行都不能留**。
+一个 2 晚的订单要**同时**在多行上成功；任何一行不够就整单失败、**一行都不能留**。改期、退订、对账全部建立在这个模型之上 —— 这也是本项目所有复杂度的源头。
 
-这是本项目的全部复杂度来源 —— 也是"改期"、"退订"、"对账"全都比单值库存难一档的原因。
+## 亮点
 
----
+**区间库存与高并发**
 
-## 五个关键设计
+- **条件 UPDATE 是唯一裁决者**：「够不够」与「扣掉」在同一条 SQL 里，没有"先查再改"的窗口
+- **台账是真相**：`booking_inventory_link` 记谁占了哪天几间；`sold_rooms` 与 Redis 缓存都是可重建的派生数据
+- **Lua 原子预占 + 事务补偿**：缓存侧快速筛选，回滚时用 `afterCompletion` 补偿，DB 仍是最终裁决
+- **ZSet 延迟队列双保险**：Lua 原子认领做多实例去重，扫表兜底防止队列丢任务
+- **缓存三兄弟各有对策**：穿透（空值标记）/ 击穿（单飞 + 锁 + 比较后删除）/ 雪崩（TTL 加法抖动）
+- **双实例并发验证过**：12 并发零重号、超时单只释放一次、会话跨实例共享
 
-### 1. 左闭右开 `[checkIn, checkOut)`
+**Agent 与 RAG**
 
-`11-20 到 11-22` 占 **2 天**（11-20、11-21），**不含离店日**。
+- **模型只做一件事**：把自然语言解析成 `{意图, 槽位}`。算价、查房、排序、总价全部由代码完成
+- **工具编排做了两条路并实测对比**：确定性意图路由 vs function calling（结论见下方 A/B 一节）
+- **订单 HITL**：下单前三道安全线 —— 内容只来自草案、身份只来自 `UserContext`、草案用完即作废
+- **两处确定性兜底**：「确认」这类词不交给模型判断；日期被模型放错槽位时自动归一
+- **RAG 带引用与拒答**：只依据检索到的原文作答，资料里没有就明说没查到
+- **三层评测**：40 条 Agent 用例（意图/槽位/阶段）+ 15 条检索用例（recall@k）+ 377 项端到端断言
 
-库存、价格、台账、测试全部遵守这一条 —— 否则边界永远差一天，而且这种 bug 只在月份切换和改期时暴露。
+## 总体架构
 
-### 2. 条件 UPDATE 是唯一裁决者
+```mermaid
+flowchart LR
+    U[User / Client] --> AUTH[AuthInterceptor<br/>token → UserContext]
+    AUTH --> ADMIN[AdminInterceptor<br/>运维接口要管理员]
+    ADMIN --> API[Controller<br/>30 个接口]
 
-```sql
-UPDATE room_inventory
-   SET sold_rooms = sold_rooms + ?, version = version + 1
- WHERE room_type_id = ? AND stay_date = ?
-   AND sold_rooms + ? <= total_rooms      -- ← 判断和修改在同一条语句里
+    API --> BS[BookingServiceImpl<br/>下单/支付/取消/改期/失效]
+    API --> AS[AgentService<br/>意图→槽位→工具→HITL]
+    API --> OPS[运维接口<br/>重建/比对/清理]
+
+    BS --> IC[InventoryCacheService<br/>Lua 原子预占]
+    BS --> ID[IdempotentAspect<br/>接口幂等]
+    BS --> DQ[OrderDelayQueue<br/>ZSet 延迟队列]
+
+    AS --> LLM[DeepSeekLlmClient<br/>只解析意图与工具选择]
+    AS --> ST[HotelSearchTool<br/>可订+报价+名称收窄]
+    AS --> MB[MyBookingTool<br/>我的订单]
+    AS --> KB[HotelKbIndex<br/>ES 检索+引用]
+
+    IC --> REDIS[(Redis)]
+    IC --> MYSQL[(MySQL<br/>台账=真相)]
+    ID --> REDIS
+    DQ --> REDIS
+    ST --> MYSQL
+    ST --> KB
+    MB --> MYSQL
+    KB --> ES[(Elasticsearch)]
 ```
 
-判断和修改在一条 SQL 里，**没有"先查再改"的窗口**。
+## 区间库存实战
 
-Redis 只是加速层：它答"够不够"是为了少查库，真打起来还是数据库说了算。
+这里不是"把 Redis 命令挨个试一遍"，而是**每个考点都由一个真实的业务需求逼出来** —— 没有"用户手抖点两下会下两张单"的问题，就不会有幂等切面。
 
-### 3. 台账是真相，`sold_rooms` 只是可重建的汇总
+| 业务需求 | 技术点 | 用到的能力 | 代码落点 |
+| --- | --- | --- | --- |
+| 一个 2 晚订单要跨两天同时成功 | **逐日库存建模** | 每天一行 `UNIQUE(room_type_id, stay_date)`，左闭右开 `[checkIn, checkOut)` | [`schema.sql`](db/schema.sql) |
+| 防止超卖 | **条件 UPDATE** | 判断与修改合并为一条 SQL，不靠"先查再改" | [`BookingServiceImpl`](src/main/java/com/fancy/hotel/service/impl/BookingServiceImpl.java) |
+| 退订/改期后要能对账 | **台账** | `booking_inventory_link` 是唯一真相；`sold_rooms` 只是可重建的汇总 | [`BookingServiceImpl`](src/main/java/com/fancy/hotel/service/impl/BookingServiceImpl.java) |
+| 缓存预占成功但事务回滚 | **事务补偿** | `TransactionSynchronization.afterCompletion` 里把 Redis 占位还回去 | [`BookingServiceImpl`](src/main/java/com/fancy/hotel/service/impl/BookingServiceImpl.java) |
+| 库存行可能不存在，边建边扣 | **S→X 锁升级死锁** | `INSERT IGNORE` 留共享锁、后续 `UPDATE` 要排他锁 → 补建行必须挪出事务（`NOT_SUPPORTED`，且必须是独立 Bean） | [`InventoryRowPreparer`](src/main/java/com/fancy/hotel/service/InventoryRowPreparer.java) |
+| 超时未支付要自动释放 | **ZSet 延迟队列** | `ZRANGEBYSCORE` + `ZREM` 用 Lua 做成原子认领，多实例天然去重；另有扫表兜底 | [`OrderDelayQueue`](src/main/java/com/fancy/hotel/service/OrderDelayQueue.java) |
+| 附近酒店要按距离排序 | **GEO** | 单 key + `GEOSEARCH`；非距离排序时自动放大候选池 | [`HotelGeoIndex`](src/main/java/com/fancy/hotel/service/HotelGeoIndex.java) |
+| 反复查一个不存在的房型 | **缓存穿透** | 空值标记（tombstone 60 秒），只缓存"确实不存在" | [`AbsentCache`](src/main/java/com/fancy/hotel/service/AbsentCache.java) |
+| 热点日期的库存被并发回源 | **缓存击穿** | 单飞 + 分布式锁 + Lua 比较后删除（不误删别人的锁） | [`InventoryCacheService`](src/main/java/com/fancy/hotel/service/InventoryCacheService.java) / [`DistributedLock`](src/main/java/com/fancy/hotel/service/DistributedLock.java) |
+| 同一批缓存 key 同时过期 | **缓存雪崩** | TTL 加法抖动：`base + random(0, jitter)` | [`InventoryCacheService`](src/main/java/com/fancy/hotel/service/InventoryCacheService.java) |
+| 改价后报价必须立刻变 | **价格缓存失效** | 按月 Hash 缓存 + 改价时删 key（不是更新 key） | [`PriceCacheService`](src/main/java/com/fancy/hotel/service/PriceCacheService.java) |
+| 用户手抖点两下会下两张单 | **接口幂等** | `@Idempotent` AOP（在事务之外）+ `SET NX EX` + 结果回放；**指纹里含登录用户** | [`IdempotentAspect`](src/main/java/com/fancy/hotel/config/IdempotentAspect.java) |
+| 有人拿别人的订单号来操作 | **越权校验** | 归属校验下沉到唯一入口 `requireBooking`，越权统一 403 且零副作用 | [`BookingServiceImpl`](src/main/java/com/fancy/hotel/service/impl/BookingServiceImpl.java) |
+| 两个实例同时跑定时任务 | **多实例去重** | 认领靠 Redis 里的条件操作（Lua / 条件 UPDATE），不靠本地状态 | [`OrderDelayQueue`](src/main/java/com/fancy/hotel/service/OrderDelayQueue.java) / [`OrderTimeoutJob`](src/main/java/com/fancy/hotel/job/OrderTimeoutJob.java) |
 
-```
-booking_inventory_link（台账）   每笔订单占用了哪个房型的哪一天、几间、是否已释放
-        ↓ 汇总
-room_inventory.sold_rooms        可重建的聚合值
-        ↓ 派生
-Redis 缓存                       可随时删掉
-```
+### 代码组织上的几个约定
 
-箭头只能向外。所以任何一层坏了都能从台账重建 —— 测试里有一条专门的"零漂移"检查，全表比对台账汇总与 `sold_rooms`。
+- **4 个 Lua 脚本集中在** [`RedisScripts`](src/main/java/com/fancy/hotel/config/RedisScripts.java)，每个脚本的注释都写明了它要解决的是哪个竞态（[`lua/`](src/main/resources/lua/)）。
+- **所有 key 集中在** [`RedisKeyConstants`](src/main/java/com/fancy/hotel/common/RedisKeyConstants.java)，不在业务代码里就地拼字符串。
+- **缓存只做加速，绝不做正确性依赖**：Redis 预占只是快速筛选，条件 UPDATE 才是唯一裁决；**Redis 不可用时业务降级而不是报错**（这条是踩过坑之后才补上的，见下方 bug 清单第 2 条）。
+- **状态码 90 / 91 拆开**：`90 CANCELLED`（用户取消，按退订政策扣费）与 `91 EXPIRED`（超时失效，全额退）—— 合成一个"已取消"会让退款口径和统计全部含糊。
 
-### 4. 状态码 90 与 91 分开
+## Agent 与 RAG 链路
 
-```
-90  CANCELLED   用户主动取消（按退订政策算钱，可能扣费）
-91  EXPIRED     待支付超时，系统释放（全额、不扣钱、cancel_role = SYSTEM）
-```
+### 1. 主链路
 
-合成一个"已取消"会让退款逻辑和统计口径全部含糊 —— 而这恰好是最常被财务问到的问题。
+仓库里的主入口是 [`AgentService`](src/main/java/com/fancy/hotel/service/agent/AgentService.java)：
 
-### 5. 身份只来自凭证，不来自入参
+1. `AgentController` 接收 `POST /agent/chat`，身份来自 token 而不是请求体
+2. `AgentService` 从 Redis 载入会话（或新建），把**最近几轮对话 + 已知槽位 + 本轮输入**拼成提示
+3. 模型返回 `{意图, 槽位}`；服务端做二次校验（过去日期、离店≤入住、坏 JSON）
+4. 槽位不全就追问；齐了就调工具查可订 + 报价
+5. 查到结果**整份存进会话作为草案**，回复里列编号
+6. 用户说"确认"才真正下单；下单内容只来自草案
 
-`userId` **永远从 token 解出来**（`UserContext`），请求体里的 `userId` 被忽略。
+### 2. 意图与工具
 
-订单的读写都校验归属，不是自己的返回 **403**；运维接口另外要求管理员。
+当前代码支持的意图：
 
----
+| 意图 | 含义 | 会做什么 |
+| --- | --- | --- |
+| `BOOK` | 要订房 | 查可订 + 报价，出候选草案 |
+| `QUERY` | 只是问问 | 同上，但不进入下单语义 |
+| `MYBOOKINGS` | 我的订单 | 列出待支付/已确认的订单 |
+| `CANCEL` | 取消订单 | 解析目标订单 → 出取消草案 → 等确认 |
+| `RESCHEDULE` | 改期 | 解析订单 + 新日期 → 出改期草案 → 等确认 |
+| `FACILITY` | 设施/政策问答 | 走 RAG 检索，带引用作答 |
+| `CONFIRM` | 确认 | 按草案类型执行（订 / 取消 / 改期） |
+| `CHITCHAT` | 闲聊 | 引导回业务 |
 
-## 功能一览
+工具只有两个，但都很实：[`HotelSearchTool`](src/main/java/com/fancy/hotel/service/agent/HotelSearchTool.java)（可按酒店名收窄）、[`MyBookingTool`](src/main/java/com/fancy/hotel/service/agent/MyBookingTool.java)。
 
-| 模块 | 内容 |
-|---|---|
-| **订单** | 下单 / 支付 / 取消（退订政策）/ 改期（只动台账差集）/ 超时失效 |
-| **库存** | 区间库存、条件 UPDATE 预占、Redis 缓存（Lua 原子预占 + 回滚补偿） |
-| **幂等** | `@Idempotent` + `SET NX EX` + 结果回放；指纹里含登录用户，不会跨用户串单 |
-| **延迟队列** | Redis ZSet + Lua 原子认领 + 扫表兜底（双保险） |
-| **附近** | Redis GEO（单 key）、`GEOSEARCH`、启动预热、候选池放大 |
-| **缓存治理** | 穿透（空值标记）/ 击穿（单飞 + 锁）/ 雪崩（TTL 抖动） |
-| **价格日历** | 按月 Hash 缓存、改价即时失效、无价格日期明确报错 |
-| **鉴权** | 登录 / token / 拦截器 / 越权 403 / 运维接口要管理员 |
-| **Agent** | 意图路由、槽位多轮、工具调用、**HITL 确认后才下单** |
+### 3. HITL：为什么"模型不能直接下单"
 
----
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as AgentController
+    participant S as AgentService
+    participant L as DeepSeekLlmClient
+    participant T as HotelSearchTool
+    participant B as BookingServiceImpl
+    participant R as Redis Session
 
-## 接口一览
+    U->>A: POST /agent/chat {message}
+    A->>S: chat(userId, dto)
+    S->>R: 载入会话（没有就新建）
+    S->>L: 解析意图 + 槽位（JSON 模式）
+    L-->>S: {intent: BOOK, slots: {...}}
+    S->>R: 合并槽位（历史也一并拼进提示）
 
-共 **32 个**接口。除 `/auth/login` 外都需要 `Authorization: Bearer <token>`；标 🔒 的需要管理员。
+    alt 槽位不全
+        S-->>U: COLLECTING「还需要知道城市/日期」
+    else 槽位齐了
+        S->>T: search(城市, 日期, 间数, 床型, 酒店名？)
+        T-->>S: 候选（可订 + 每晚价 + 总价）
+        S->>R: 存草案（整份候选 + selectedIndex）
+        S-->>U: SEARCHED + 编号列表
+    end
 
-### 认证
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/auth/login` | 登录，返回 token（免鉴权） |
-| POST | `/auth/logout` | 退出，token 立刻失效 |
-| GET | `/auth/me` | 我是谁 |
-
-### 预订
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/booking/availability` | 查某房型某区间有没有房 |
-| POST | `/booking/quote` | 报价（逐晚累加） |
-| POST | `/booking` | 下单（幂等） |
-| GET | `/booking/my` | 我的订单 |
-| GET | `/booking/{bookingId}` | 订单详情（越权 403） |
-| GET | `/booking/user/{userId}` | 某人的订单（越权 403） |
-| POST | `/booking/{bookingId}/pay` | 支付 |
-| POST | `/booking/{bookingId}/cancel` | 取消 |
-| POST | `/booking/{bookingId}/reschedule` | 改期 |
-| POST | `/booking/expire-scan` 🔒 | 手动批量释放超时订单 |
-
-### 酒店
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/booking/hotel/nearby` | 附近酒店（GEO + 排序 + 有房过滤） |
-| POST | `/booking/hotel/price/update` 🔒 | 改某天房价 |
-| POST | `/booking/hotel/geo/rebuild` 🔒 | 重建 GEO 索引 |
-| GET | `/booking/hotel/geo/stat` 🔒 | GEO 索引状态 |
-| GET | `/booking/hotel/search` | 按名称搜酒店（ES 模糊匹配，容错别字） |
-| POST | `/booking/hotel/kb/rebuild` 🔒 | 重建知识库索引 |
-| GET | `/booking/hotel/kb/search` 🔒 | 试检索（调试用） |
-
-### 库存缓存（运维）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/booking/inv/rebuild` 🔒 | 从 DB 重建缓存 |
-| GET | `/booking/inv/compare` 🔒 | 缓存与 DB 比对 |
-| GET | `/booking/inv/dump` 🔒 | 导出某区间缓存值 |
-
-### 延迟队列（运维）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/booking/delay/stat` 🔒 | 队列状态 |
-| POST | `/booking/delay/rebuild` 🔒 | 从 DB 重建队列 |
-| POST | `/booking/delay/sweep` 🔒 | 立即扫表兜底一次 |
-
-### 维护（运维）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/booking/maintenance/stat` 🔒 | 数据量概览 |
-| POST | `/booking/maintenance/cleanup` 🔒 | 清理历史数据 |
-
-### Agent
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/agent/chat` | 说话（可带 sessionId 续多轮） |
-| POST | `/agent/reset` | 丢掉会话 |
-
----
-
-## 架构
-
-```
-                        ┌──────────────────────────────┐
-   HTTP  ────────────►  │  拦截器  登录 → 管理员        │
-                        └──────────────┬───────────────┘
-                                       ▼
-                        ┌──────────────────────────────┐
-                        │  Controller（27 个接口）      │
-                        └──────────────┬───────────────┘
-                                       ▼
-              ┌────────────────────────┴────────────────────────┐
-              ▼                        ▼                        ▼
-      ┌───────────────┐        ┌──────────────┐        ┌──────────────┐
-      │ BookingService│        │ AgentService │        │ 运维 / Job   │
-      │ 下单/支付/改期 │        │ 意图→槽位→工具│        │ 超时·清理    │
-      └───────┬───────┘        └──────┬───────┘        └──────┬───────┘
-              │                       │                       │
-              ▼                       ▼                       ▼
-      ┌───────────────┐        ┌──────────────┐        ┌──────────────┐
-      │ 库存缓存 + Lua │        │ 会话 + LLM   │        │ 延迟队列 ZSet │
-      │ 幂等 / 价格    │        │（只解析意图） │        │              │
-      └───────┬───────┘        └──────────────┘        └──────┬───────┘
-              │ 降级                                        │
-              ▼                                             │
-      ┌──────────────────────────────────────────────────┐  │
-      │   MySQL：台账（真相）+ room_inventory（汇总）      │◄─┘ 兜底扫表
-      │   条件 UPDATE 是唯一裁决者                         │
-      └──────────────────────────────────────────────────┘
+    U->>A: POST /agent/chat {"确认"}
+    Note over S: 明显的确认词直接判 CONFIRM<br/>不交给模型判断
+    S->>R: 取选中草案（超过 5 分钟作废）
+    S->>B: createBooking（内容来自草案，身份来自 UserContext）
+    B-->>S: bookingId
+    S->>R: 清草案（用完即作废）
+    S-->>U: BOOKED + 订单号
 ```
 
-**一条铁律**：Redis 里的东西全部可重建（缓存、队列、会话）；
-MySQL 里的台账不可重建，所以它说了算。
+这条链路里有几个关键点：
 
----
+- **槽位不是只存在 Prompt 里**，而是显式写进 Redis 会话，可跨实例、可重启
+- **候选不是只回给前端**，而是整份存进会话 —— 用户说"第二个"真的能选中第二个
+- **下单内容只来自草案**，不来自用户这句话、也不来自模型；否则"订那个 100 块的"就能把订单引走
+- **身份只来自 `UserContext`**，模型永远不参与
+- **确认词有确定性兜底**：上文全在聊"取消"时，模型会把"确认"也判成 CANCEL，导致死循环 —— 这个坑实测踩到过
 
-## 技术栈
+### 4. RAG 链路
 
-| | |
-|---|---|
-| 语言 / 运行时 | Java 21 |
-| 框架 | Spring Boot 3.5.9（Web / Validation / AOP / Data-Redis） |
-| 持久层 | MyBatis-Plus 3.5.9 |
-| 数据库 | MySQL 8 |
-| 缓存 / 队列 / GEO | Redis 7 |
-| 口令 | spring-security-crypto（只用 BCrypt，不引入整套 Security） |
-| 大模型 | DeepSeek（OpenAI 兼容格式，换模型只改配置） |
-| 检索 | Elasticsearch 8（内置 ngram analyzer，未装插件；JDK HttpClient 直连，不引官方客户端） |
-| 其它 | Lombok、Jackson |
-
----
-
-## 快速开始
-
-### 依赖
-
-Java 21、Maven 3.9+、MySQL 8、Redis 7。
-
-### 1. 建库
-
-```bash
-mysql -uroot -p < db/schema.sql
-mysql -uroot -p < db/seed-p0.sql
-```
-
-已有库升级：按顺序跑 `db/migration-p1.sql` → `migration-p2.sql` → `migration-p4.sql`。
-
-种子包含 5 家酒店、6 个房型、180 天价格日历，以及 3 个账号（密码都是 `123456`）：
-
-| 账号 | 角色 | 用途 |
-|---|---|---|
-| `testuser` | USER | 普通用户 |
-| `otheruser` | USER | 验证越权 |
-| `admin` | ADMIN | 运维接口 |
-
-### 2. 配置
-
-默认连 `127.0.0.1:13306`（MySQL）和 `127.0.0.1:16379`（Redis），
-可用环境变量覆盖：`DB_HOST` / `DB_PORT` / `REDIS_HOST` / `REDIS_PORT` 等。
-
-Agent 需要大模型 key —— **不配置也能启动**，只是 `/agent/chat` 返回 503：
-
-```bash
-export DEEPSEEK_API_KEY=sk-xxxx
-```
-
-> ⚠️ **key 不要写进仓库**。`application.yaml` 里只有占位符 `${DEEPSEEK_API_KEY:}`。
-
-### 3. 启动
-
-```bash
-mvn spring-boot:run
-```
-
-### 4. 试一下
-
-```bash
-# 登录
-curl -X POST localhost:8080/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"testuser","password":"123456"}'
-# → {"code":200,"data":{"token":"...","userId":9001,"role":"USER"}}
-
-TOKEN=...
-
-# 查可订
-curl "localhost:8080/booking/availability?roomTypeId=2001&checkIn=2026-11-20&checkOut=2026-11-22&roomCount=1" \
-  -H "Authorization: Bearer $TOKEN"
-
-# 用自然语言订房
-curl -X POST localhost:8080/agent/chat \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"message":"帮我订杭州11月20号住两晚，要大床房"}'
-# → {"data":{"stage":"SEARCHED","reply":"找到 2 个可订的房型…","candidates":[…]}}
-
-# 确认（带上一步返回的 sessionId）
-curl -X POST localhost:8080/agent/chat \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"sessionId":"<上一步的>","message":"确认"}'
-# → {"data":{"stage":"BOOKED","bookingId":2120…,"reply":"订好了！订单号 …"}}
-```
-
----
-
-## Agent 是怎么做的
+[`HotelKbIndex`](src/main/java/com/fancy/hotel/service/HotelKbIndex.java) 承担检索，数据流是：
 
 ```
-用户一句话
-  → ① 大模型解析成 {意图, 槽位}        ← 只有这一步用模型
-  → ② 合并会话里已有的槽位（多轮）
-  → ③ 缺什么就用模板话术追问
-  → ④ 齐了调工具：按城市查酒店 → 查可订 → 报价 → 出候选
-  → ⑤ 存成【草案】，等用户说"确认"
-  → ⑥ 确认 → 用草案下单 → 返回订单号
-```
-
-**核心判断：只有第 ① 步用模型。**
-
-模型擅长"把自然语言变成结构化参数"，不擅长也不该做业务计算。
-日期怎么换算、库存够不够、总价多少 —— 用代码算：结果确定、可测试、不花钱。
-
-实测这条链路的解析效果：
-
-```
-"帮我订杭州11月20号住两晚，要大床房，1间"
-  → BOOK / 杭州 / 2026-11-20 → 2026-11-22 / 1间 / 大床
-
-"明天杭州有房吗"     → QUERY / 杭州 / 2026-11-12（相对日期换算正确）
-"算了不订了"         → CANCEL
-"我想订房"           → BOOK，且知道自己缺 city / checkIn / checkOut
-```
-
-### ★ 三条安全线（第 ⑥ 步）
-
-1. **下单内容只来自草案** —— 不来自用户这句话，也不来自模型。
-   否则"订那个 100 块的"就能把订单引到别处去。
-2. **身份只来自 `UserContext`** —— 模型永远不参与。
-3. **草案用完即作废** —— 连点两次"确认"不会下两单；草案超过 5 分钟也作废（价格和房态会变）。
-
-测试里有一条硬断言：草案指向 2001，而"重新搜一次"会选中 2003（更便宜）——
-**最终订的必须是 2001**，证明内容真的来自草案。
-
-### 模型不可全信
-
-即使只让它解析意图，服务端也要二次校验：过去的日期、`离店 ≤ 入住`、坏 JSON、
-格式错误 —— 全部当作"没听懂"处理并重新追问，而不是信任后往下传。
-
----
-
-## RAG：酒店资料问答（带出处 + 拒答）
-
-用户会问"有没有停车场""能带宠物吗""几点退房""退订扣多少" —— 这些答案在酒店的
-条款文本里，不在数据库的字段里。所以做了一套检索增强问答。
-
-### 数据流
-
-```
-hotel_kb_doc（MySQL，24 份原文）          ← 真相
-        ↓ 重建（POST /booking/hotel/kb/rebuild）
+hotel_kb_doc（MySQL，42 份原文）      ← 真相
+        ↓ POST /booking/hotel/kb/rebuild
 hotel_kb_v1（ES 索引：正文 + 酒店名）
         ↓ 检索（ngram + fuzziness + highlight）
 模型（只依据检索到的原文作答，没有就说没有）
 ```
 
-**和项目其它地方一个思路**：MySQL 是真相，ES 是可重建的派生索引。索引坏了、mapping 要改，
-重建一次就行 —— 和库存缓存、GEO 索引完全一致。
+几个刻意的设计：
 
-### 三个刻意的设计
+- **按"小节"切块**，不按字数硬切 —— 引用要说得清"依据：XX 酒店 · 停车场"
+- **不装 IK，用 ES 内置 ngram**：容器内拉 GitHub 装 IK 超时，改用内置 ngram 后实测三件事都正常（正文检索 / 引用高亮 / 错别字 fuzziness）
+- **拒答交给模型判断，不靠分数阈值**：一开始想用"相关度低于 2.5 就丢掉"，实测不可靠 —— ngram 几乎总能召回含共同二字切片的段落。改成 grounded generation，让模型判断"这份资料够不够回答"
+- **酒店名支持错别字**：`fuzziness=AUTO`，"西部国宾馆"能匹配到"杭州西湖国宾馆"（分数 3.24），并有分数阈值兜住不乱认
 
-**① 按"小节"切块，不按字数硬切**
+## ★ 两种工具编排的实测对比
 
-引用要说得清"依据：XX 酒店 · 停车场"。200 字一硬切会把"有 30 个车位、住店免费"
-切成两半，检索到一半反而答得含糊。
+Agent 的工具编排实现了两条路，用同一批 handler、同一个评测集跑出来的真实数据：
 
-**② 不装 IK，用 ES 内置 ngram analyzer**
-
-试过装 IK，容器内拉 GitHub 超时。改用内置 ngram（二元切分）后实测三件事都正常：
-正文检索、引用高亮（`<em>`）、错别字匹配（"西部国宾馆"→"杭州西湖国宾馆"，0.73 vs 1.45）。
-对"几十份条款"这个规模，IK 带来的差别肉眼不可见。
-
-**③ ★ 拒答交给模型判断，不靠分数阈值**
-
-一开始想用"相关度低于 2.5 就丢掉"来实现拒答 —— **实测不可靠**：
-ngram 二元切分几乎总能召回点什么（"民宿""免费"这类二字切片到处都是），
-勉强沾边的段落也能到 3 分，而真正相关的 7~9 分。阈值区分不了"没查到"和"查到点边角"。
-
-改成 **grounded generation**：把检索到的原文交给模型，要求它
-`只依据资料回答；资料里没写到就必须说没有查到`，并返回结构化结果 `{found, answer}`。
-让模型判断"这份资料够不够回答" —— 这才是它擅长的。
-
-实测：
-
-```
-「杭州西湖国宾馆有停车场吗？能带宠物吗」
-  → 有停车场。资料[1]提到：园区内设地面停车场，共 120 个车位…
-    关于宠物，资料[2]提到：酒店不接受携带宠物入住…
-
-「杭州湖滨银泰酒店能带宠物吗」（同一句，换一家）
-  → 可以。资料[1]提到：允许 10 公斤以下的小型犬，每晚 150 元清洁费…
-
-「杭州西溪湿地民宿有室内恒温泳池吗」（语料里确实没有）
-  → NO_ANSWER：这个我这边没有查到可靠的资料，怕答错，所以不敢乱说。
-```
-
-### 检索质量：recall@3 = 73.3%
-
-Agent 评测衡量"意图和槽位对不对"，但 RAG 里还有一环没人管：**检索有没有把正确的小节捞回来**。
-检索错了，模型再聪明也只能基于错的资料作答。
-
-所以另有一份 15 条的标注集（问题 → 正确小节），只看检索这一环：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\p4_kb_eval.ps1
-```
-
-```
-recall@1 = 15/15 = 100.0%
-recall@3 = 15/15 = 100.0%
-```
-
-> ⚠️ **这个 100% 是过拟合的，我很清楚**：同义词表是照着这 4 条失败写出来的。
-> 它只说明"这 15 条已经被覆盖"，**不说明真实用户会得到 100%**。
-> 要测泛化得用**held-out 集**（没参与调参的新问题）—— 这是这套评测下一步该补的东西。
-
-一开始只有 60%。**我没有靠调参往上凑，而是先归因，做了两个"不花一分钱"的修复：**
-
-| 修复 | recall@3 | 说明 |
-|---|---|---|
-| 基线 | 60.0% | |
-| 撤掉按分数过滤（`MIN_RELEVANCE`） | 66.7% | 那个阈值是为拒答加的，而拒答已改成 grounded generation，不再需要它。**同一个数字不该既当排序又当裁决** |
-| 修 `section` 的 mapping | 73.3% | `section` 是 `keyword`（不分词），却被放进了 `multi_match` —— 于是"退订"永远匹配不上小节标题「取消与退订」。加一个 ngram 子字段 `section.txt` 后两处都命中 |
-| 查询侧同义词扩展 | **100%**（过拟合，见下） | 「小狗/猫→宠物」「接机→接送机」「去不了→取消」。纯 Java 展开成多路 `should`，**不需要重建索引** |
-
-**剩下 4 条失败，全部是同一个原因：同义词 / 词汇形态**
-
-| 类型 | 例子 | 根因 |
-|---|---|---|
-| 同义/口语 | 「能不能带**小狗**」「带着**猫**能住吗」「临时有事**去不了**怎么退」 | 二元切分没有语义，`小狗`/`猫` ≠ `宠物` |
-| 词汇形态 | 「能安排**接机**吗」→ 期望「停车与交通」（原文写"接送机"） | `接送机` 的切片是 `接送`/`送机`，**不含 `接机`** |
-
-**结论（也是下一步的方向）**：词法检索的召回上限就在这里，剩下的缺口正是同义词。
-最便宜的一步是**查询侧同义词扩展**（小狗/猫/宠物归一，接机/接送机归一），
-零新依赖。再往上才需要 embedding 做向量检索 —— 但语料只有 24 份，还没到那个规模。
-
-| 失败类型 | 例子 | 根因 |
-|---|---|---|
-| 同义/口语差异 | 「能不能带**小狗**」「带着**猫**能住吗」→ 期望「宠物政策」 | 二元切分没有语义，`小狗` ≠ `宠物` |
-| 词汇形态差异 | 「能安排**接机**吗」→ 期望「停车与交通」（原文写"接送机"） | `接送机` 的二元切片是 `接送/送机`，不含 `接机` |
-| 被相关性阈值误伤 | 「几点可以入住」「退订要扣多少钱」→ 返回空 | 我加的 `MIN_RELEVANCE=2.5` 把弱匹配过滤掉了 |
-
-**结论（也是下一步的方向）**：无插件的词法检索只能到这个水平。
-要往上走有两条路 —— ① **同义词扩展**（小狗/猫/宠物归一，接机/接送机归一）；
-② **引入 embedding 做向量检索**（DeepSeek 没有 embedding 接口，得接第三家）。
-
-这正是"先用最省的方案跑通、量出基线、再决定要不要换"的做法：
-现在基线是 60%，换方案能不能变好、值不值，有据可依了。
-
-### 顺带修掉一个洞：酒店名没参与检索
-
-用户说"我要订杭州西湖国宾馆"，原来的 `HotelSearchTool` **只按城市查** ——
-把杭州所有酒店都列出来，名字被丢掉了。
-
-现在用 ES 做名称匹配（支持错别字），**认不出来就不收窄** ——
-宁可多列几家，也不要因为认错而把正确答案筛掉。
-
-## 项目结构
-
-```
-src/main/java/com/fancy/hotel/
-├─ common/        统一返回、业务异常、UserContext、幂等注解、Redis key 常量
-├─ config/        拦截器（登录 / 管理员）、幂等 AOP、Lua 脚本
-├─ controller/    HTTP 入口（27 个接口）
-├─ domain/        entity / dto / vo / enums，Agent 会话与草案
-├─ mapper/        MyBatis-Plus
-├─ service/       业务主体
-│  ├─ impl/       BookingServiceImpl（下单 / 支付 / 取消 / 改期 / 超时）
-│  └─ agent/      LLM 客户端、会话存储、搜索工具、Agent 编排
-└─ job/           超时扫描、定期清理
-src/main/resources/
-├─ lua/           inventory_reserve / inventory_release / delay_claim / lock_unlock
-└─ application.yaml
-db/               schema.sql、seed-p0.sql、migration-p*.sql
-docs/             设计文档（见下）
-test/             端到端测试脚本
-```
-
----
-
-## 测试
-
-测试是**端到端的 PowerShell 脚本**，不是单元测试 —— 因为这些内容
-（并发、缓存、死锁、幂等、越权）只有真的打接口才看得见。
-
-```powershell
-cd test
-powershell -NoProfile -ExecutionPolicy Bypass -File .\p0_flow_test.ps1
-```
-
-| 套件 | 覆盖 |
-|---|---|
-| `p0_flow_test` | 下单→支付→取消 / 超卖拒绝 / 超时释放 |
-| `p0_1_reschedule_test` | 改期：延长 / 平移 / 缩短 / 错开 / 回滚 |
-| `p1_inventory_cache_test` | 缓存与 DB 一致性、冷缓存降级、跨月 |
-| `p1_idempotency_test` | 重复提交只下一单、结果回放 |
-| `p2_delay_queue_test` | 延迟队列认领、扫表兜底 |
-| `p2_geo_test` / `p2_nearby_filter_test` | GEO 检索、排序与有房过滤 |
-| `p3_*` | 穿透 / 击穿 / 雪崩 / 价格缓存 |
-| `p4_auth_test` / `p4_authz_test` | 登录、越权 403、运维接口要管理员 |
-| `p4_agent_test` / `p4_agent_hitl_test` | Agent 多轮、确认后下单（演示套件） |
-| `p6_multi_instance_test.ps1` | **双实例用（8080+8081）**：并发下单 bookingId 不重复 / 超时关单只释放一次 / 会话跨实例共享 / 零漂移 |
-
-> **双实例怎么跑**：`mvn spring-boot:run` 起 8080，再
-> `mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8081` 起 8081。
-> 只起一个实例时 `p6_multi_instance_test` 会自动 `[SKIP]` 退出 0。
->
-> 为什么值得单独验：单实例跑久了，那些"分布式"的设计（原子认领、雪花 ID、幂等、会话共享）
-> **其实从没在并发下被验证过** —— 单实例不出问题，可能只是因为压根没并发。
-
-**14 个稳定套件共 301 项断言**，是提交前必须全绿的回归门槛。
-
-### Agent 评测（衡量"准不准"，不是"通不通"）
-
-端到端测试只能告诉你流程还走得通，**不能告诉你意图判断准不准**。所以另外有一层评测：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\p4_agent_eval.ps1
-```
-
-39 条用例覆盖意图 / 槽位 / 相对日期 / 缺字段 / 口语错别字 / 无关信息混入 / 多意图 / 超长句，
-逐条比对**期望意图 + 期望槽位 + 期望阶段**，输出三个指标（报告见 `test/eval-report.md`）：
-
-| 指标 | 基线 |
-|---|---|
-| 意图准确率 | 39/39 = 100% |
-| 槽位字段准确率 | 87/87 = 100% |
-| 阶段准确率 | 31/32 = 96.9% |
-| **端到端通过** | **38/39 = 97.4%** |
-| 延迟 | p50 = 2.1s，p95 = 5.8s |
-
-### 两种工具编排的实测对比
-
-Agent 的工具编排实现了两条路，用同一批 handler、同一个评测集跑出来：
-
-| 指标 | 确定性路由（默认） | function calling |
-|---|---|---|
+| 指标 | 确定性路由（保留） | function calling |
+| --- | --- | --- |
 | 意图准确率 | **39/39 = 100%** | 31/39 = 79.5% |
 | 槽位字段准确率 | 87/87 = 100% | 87/87 = 100% |
 | 阶段准确率 | 31/32 = 96.9% | 29/32 = 90.6% |
 | **端到端通过** | **38/39 = 97.4%** | 28/39 = 71.8% |
 | 延迟 p50 | **1.67s** | 2.56s |
 
-复现：
+**结论和直觉相反**：function calling 更差。
 
-```powershell
-.\p4_agent_eval.ps1                 # 确定性路由
-.\p4_agent_eval.ps1 -Mode tools     # function calling
+原因是两个工具（查可订 / 出候选）**参数完全一样、只有意图不同**，模型倾向于选更"安全"的只读那个，于是"我要订房"被判成了查询。
+
+而**槽位准确率两边都是 100%** —— 说明瓶颈在**工具选择**，不在参数抽取。把意图区分交给"工具名"去表达，本身就是个设计错误。
+
+所以主路径保留确定性路由，function calling 作为扩展机制留着。复现：
+
+```bash
+./test/p4_agent_eval.ps1              # 确定性路由
+./test/p4_agent_eval.ps1 -Mode tools  # function calling
 ```
 
-**结论（和直觉相反）**：在这个场景里 function calling **更差**。
+## 评测体系
 
-原因是工具语义高度相近 —— `query_availability`（查）和 `propose_booking`（订）**参数完全一样，只有意图不同**，
-模型倾向于选更"安全"的只读那个，于是"我要订房"被判成了查询。
-槽位准确率两边都是 100%，说明**参数抽取不是瓶颈，工具选择才是**。
+端到端测试只回答"这条流程还通不通"，回答不了"判断准不准"。所以另外做了两层评测：
 
-所以主路径保留确定性路由；function calling 作为**扩展机制**留着（加新工具不用改分派代码）。
-这类"实测推翻直觉"的结论，比"我用了 function calling"有说服力得多。
+| 层 | 规模 | 指标 | 现状 |
+| --- | --- | --- | --- |
+| **Agent 评测** | 40 条用例 × 3 层指标（意图 / 槽位 / 阶段） | 端到端 97.5% | 用它定位并修掉 3 类模型误判 |
+| **检索评测** | 15 条标注（问题 → 正确小节） | recall@3 从 60% → 73.3% → 100% | **100% 已标注过拟合**，需 held-out 验收 |
+| **端到端** | 14 个门禁套件 301 项 + 2 个 Agent 演示套件 66 项 + 双实例 10 项 | 全绿 | 门禁套件是提交前的硬门槛 |
 
-> 每条用例用**全新会话**，测的是模型的理解能力，不是上一轮的残留。
-> 唯一未通过的是"设施问答"（"有停车场吗"）—— 那是 RAG 要解决的，已作为已知缺口留在集子里。
-两个 `p4_agent*` 是能力演示套件，依赖外部大模型，不作为门槛（详见 `test/README.md`）。
+检索的 60% → 73.3% 是**两个零成本修复**换来的：撤掉一个"既当排序又当裁决"的分数阈值、修一个 `keyword` 字段被当成分词字段用的 mapping bug。
+
+而 100% 那个数字我写明了**是过拟合** —— 同义词表是照着失败样本写的。要测泛化得用没参与调参的 held-out 集。
+
+## 挖出来的 5 个真 bug
+
+这几个不是"设计得漂亮"，是**测试和真实回归里挖出来的**，任何一条放线上都是事故：
+
+| bug | 现象 | 根因 |
+| --- | --- | --- |
+| **S→X 锁升级死锁** | 并发下单偶发 500 | `INSERT IGNORE` 在重复行上留**共享锁**，后续 `UPDATE` 需要**排他锁** → 两个事务互等。修法：补建行挪出事务 |
+| **Redis 一抖就 500** | 缓存超时时下单失败 | 有两处 Redis 调用没做降级。**缓存坏了应退化成"慢"，不该变成"错"** |
+| **跨用户幂等串单** | 两人提交相同请求体，后者拿到前者的订单号 | 幂等指纹只序列化入参，而 `userId` 后来改成从 token 取 —— **改了"值的来源"，却没改所有读它的地方** |
+| **`section` 当成 text 用** | 「退订」搜不到「取消与退订」 | mapping 是 `keyword`（不分词），却把它放进了 `multi_match` |
+| **ES 双重序列化** | 建索引成功、检索永远返回空 | `send(..., toJson(body))` 里又 `toJson` 一次 → ES 收到的是**字符串**而不是对象 |
+
+> 第一条和第三条是最有价值的：它们不是"写错一行"，而是**对机制的误解**（MySQL 锁升级、值来源变更的连带影响）。
+
+## 数据与存储职责
+
+| 存储 | 用途 | 丢了会怎样 |
+| --- | --- | --- |
+| **MySQL** | 酒店/房型/价格日历/订单/库存行/**台账**/知识库原文 | 不可恢复，是唯一真相 |
+| **Redis** | 库存缓存、幂等记录、分布式锁、token、延迟队列、GEO、价格缓存、Agent 会话 | 全部可重建（延迟队列有扫表兜底） |
+| **Elasticsearch** | 知识库索引（正文 + 酒店名） | 可重建，一个接口搞定 |
+
+一条铁律：**Redis 和 ES 里的东西全部可重建；MySQL 里的台账不可重建，所以它说了算。**
+
+## 技术栈
+
+- Java 21
+- Spring Boot 3.5.9（Web / Validation / AOP / Data-Redis）
+- MyBatis-Plus 3.5.9
+- MySQL 8
+- Redis 7（缓存 / 锁 / 延迟队列 / GEO / 会话）
+- Elasticsearch 8.12（内置 ngram analyzer，未装插件）
+- DeepSeek（OpenAI 兼容格式，换模型只改配置）
+- Lombok、Jackson
+
+## 目录结构
+
+```text
+src/main/java/com/fancy/hotel
+├─ common/                  # Result / 业务异常 / UserContext / 幂等注解 / Redis key 常量
+├─ config/                  # 拦截器（登录·管理员）、幂等 AOP、Lua 脚本
+├─ controller/              # HTTP 入口（30 个接口）
+├─ domain/                  # entity / dto / vo / enums / Agent 会话与草案
+├─ mapper/                  # MyBatis-Plus
+├─ service/                 # 业务服务
+│  ├─ impl/                 # BookingServiceImpl（下单/支付/取消/改期/失效）
+│  ├─ agent/                # LLM 客户端 / 会话存储 / 搜索工具 / Agent 编排
+│  ├─ InventoryCacheService # Lua 原子预占 + 单飞 + TTL 抖动
+│  ├─ OrderDelayQueue       # ZSet 延迟队列 + 扫描认领
+│  ├─ HotelGeoIndex         # GEO 单 key + 预热
+│  ├─ HotelKbIndex          # ES 检索 + 名称匹配
+│  └─ ...                   # AbsentCache / DistributedLock / PriceCacheService ...
+└─ job/                     # 超时扫描、定期清理
+
+src/main/resources
+├─ lua/                     # inventory_reserve / inventory_release / delay_claim / lock_unlock
+└─ application.yaml
+
+db/                         # schema.sql、seed-*.sql、migration-*.sql
+docs/                       # 01~06，一个阶段一篇（含踩坑与取舍）
+test/                       # 17 个端到端套件 + 2 套评测（PowerShell）
+```
+
+## 快速启动
+
+### 1. 准备基础依赖
+
+- Java 21、Maven 3.9+
+- MySQL 8、Redis 7
+- Elasticsearch 8（只有知识库问答需要；不装也能跑，只是设施问答不可用）
+- DeepSeek API Key（可选；不配也能启动，`/agent/chat` 返回 503）
+
+### 2. 初始化数据库
+
+```bash
+mysql -uroot -p < db/schema.sql
+mysql -uroot -p < db/seed-p0.sql        # 5 家杭州酒店 + 6 个房型 + 180 天价格日历
+mysql -uroot -p < db/seed-kb.sql        # 知识库语料（42 份，供 RAG 用）
+mysql -uroot -p < db/seed-more-hotels.sql   # 上海/苏州/北京 6 家 + 12 个房型
+```
+
+已有库升级：`migration-p1.sql` → `migration-p2.sql` → `migration-p4.sql`。
+
+种子账号（密码都是 `123456`）：`testuser` / `otheruser`（USER）、`admin`（ADMIN）。
+
+### 3. 填写配置
+
+`application.yaml` 里只放占位符，实际值用环境变量：
+
+```yaml
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:13306/hotel_booking}
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:16379}
+hotel:
+  agent:
+    api-key: ${DEEPSEEK_API_KEY:}      # 不配也能启动
+  es:
+    base-url: ${ES_BASE_URL:http://127.0.0.1:9200}
+```
+
+### 4. 启动
+
+```bash
+mvn compile
+mvn spring-boot:run
+```
+
+## 本地调试方式
+
+```bash
+# 登录（除 /auth/login 外，所有接口都要 Bearer token）
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"testuser","password":"123456"}'
+
+TOKEN=...
+
+# 查可订
+curl "http://localhost:8080/booking/availability?roomTypeId=2001&checkIn=2026-12-20&checkOut=2026-12-22&roomCount=1" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 用自然语言订房（第一句）
+curl -X POST http://localhost:8080/agent/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"message":"帮我订杭州11月20号住两晚，要大床房"}'
+
+# 确认（带上上一步返回的 sessionId）
+curl -X POST http://localhost:8080/agent/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"sessionId":"<上一步的>","message":"确认"}'
+```
+
+运维接口（要 `admin`）：`/booking/inv/rebuild`、`/booking/hotel/kb/rebuild`、`/booking/delay/sweep`、`/booking/maintenance/cleanup`。
+
+双实例验证（可选）：
+
+```bash
+mvn spring-boot:run                                                    # 8080
+mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8081      # 8081
+./test/p6_multi_instance_test.ps1
+```
+
+## 这个项目适合谁看
+
+**想补高并发正确性实战的**（如果你觉得"缓存 + 分布式锁"的练习项目不够用）：
+
+- 当库存单元变成"区间"之后，为什么"扣减"不再是 `decr` 一次就能解决的
+- 条件 UPDATE 为什么能让数据库成为唯一裁决者，以及它和"先查再改"差在哪
+- 缓存预占成功、事务回滚了怎么补偿；补偿为什么必须用 `afterCompletion` 而不是 catch
+- 一个 `INSERT IGNORE` 怎么会引出 MySQL 的锁升级死锁
+- 一致性为什么必须是"台账 + 可重建的派生"，以及零漂移对账怎么写
+- 多实例下哪些问题是真的（锁、幂等、ID、定时任务），哪些是假的（缓存广播）
+
+**想做 Agent 工程化的**：
+
+- 为什么"只让模型解析意图"比"让模型算总价"更可靠
+- 工具编排用确定性路由还是 function calling —— 这里有一份实测数据和反直觉结论
+- 如何给高风险动作（下单）加上"草案 → 确认 → 才执行"的断点
+- 模型不可信时怎么兜：日期二次校验、坏 JSON 降级、确认词确定性兜底
+- RAG 怎么做到"没有就说没有"，以及为什么分数阈值不管用
+
+## 后续可以继续增强的方向
+
+- 增加统一可观测性：每轮对话的 trace、token 消耗、工具耗时、失败率
+- 用 held-out 检索集验收同义词表的真实泛化能力（当前 100% 是过拟合）
+- 接入和风天气，让 Agent 具备"订房前看天气"的决策能力
+- 把 PowerShell 端到端测试补一份 JUnit，接进 CI
+- 修掉 `CreateBookingDTO.userId` 上那个"服务端已不读却仍是 `@NotNull`"的 API 不一致
 
 ---
 
-## 文档
+如果你是来学**高并发正确性**的，这个项目的重点不是"用了多少条 Redis 命令"，而是：  
+**怎样让每一个缓存/锁/队列的存在，都能回答"去掉它会出什么事故"。**
 
-| 文件 | 内容 |
-|---|---|
-| `docs/01-domain-model.md` | 领域模型：为什么按天存、状态机、台账设计 |
-| `docs/02-P0总结.md` | P0：区间库存的并发正确性（条件 UPDATE、左闭右开） |
-| `docs/03-P1总结.md` | P1：缓存与 DB 的最终一致性、幂等 |
-| `docs/04-P2总结.md` | P2：延迟队列、GEO、排序过滤 |
-| `docs/05-P3总结.md` | P3：穿透 / 击穿 / 雪崩，以及那个 S→X 锁升级死锁 |
-| `docs/06-P4总结.md` | P4：鉴权、越权、Agent 与 HITL |
-
----
-
-## 开发过程中挖到的几个真 bug
-
-这几个不是"设计得漂亮"，是**测试和回归真的抓出来的**，也都写进了对应文档：
-
-| bug | 现象 | 原因 |
-|---|---|---|
-| **S→X 锁升级死锁** | 并发下单偶发 500 | `INSERT IGNORE` 会在重复行上留共享锁，后续 `UPDATE` 需要排他锁 → 互相等待 |
-| **Redis 一抖就 500** | 缓存超时时下单失败 | 有两处 Redis 调用没做降级；缓存坏了应退化为"慢"，不应变成"错" |
-| **跨用户幂等串单** | 两人提交相同请求体，后者拿到前者的订单号 | 幂等指纹只序列化入参，而 `userId` 改成了从 token 取 |
-
-这三条也是本项目最值得看的部分 —— 它们只在**并发 + 真实回归**下才会露出来。
-
----
-
-## 已知边界
-
-- **支付是假的**：`pay` 只改状态，没有接真实支付网关
-- **Agent 只支持预订**：取消 / 改期会如实告诉用户"这个还不会，请去订单页操作"
-- **大模型是演示级**：两个 Agent 测试套件依赖外部 API，连跑全量时可能抖动，不追求高并发
-- **开发环境经 SSH 隧道访问远端 Redis**：十几路并发时单条命令可能排队几秒，
-  所以 `application.yaml` 里 Redis 超时放宽到 10 秒（生产同机房可调回 3 秒）
-- **Mongo / Elasticsearch 未使用**：环境已就绪，预留给后续的工单与检索
+如果你是来学 **Agent 工程化**的，重点也不是"模型多强"，而是：  
+**怎样把模型的输出约束进一条能确认、能追溯、能在它出错时兜住的业务链路里。**
